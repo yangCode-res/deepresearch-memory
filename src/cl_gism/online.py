@@ -11,6 +11,7 @@ from .llm_state_update import LLMStateUpdater
 from .retrieval import LexicalMemoryIndex, MemoryHit, build_retrieval_query
 from .schema import LoopMemory, MemoryStatus, RawMemory, SourceType, TaskAnchor, utc_now
 from .trajectory import TrajectoryEvent
+from .unified_controller import UnifiedMemoryController
 
 
 def _message_text(message: dict[str, Any]) -> str:
@@ -70,6 +71,7 @@ class OnlineMemorySession:
         system_prompt: str,
         boundary_judge: LLMLoopBoundaryJudge,
         state_updater: LLMStateUpdater,
+        unified_controller: UnifiedMemoryController | None = None,
         top_k: int = 4,
         memory_text_limit: int = 1800,
     ) -> None:
@@ -79,6 +81,7 @@ class OnlineMemorySession:
         self.system_prompt = system_prompt
         self.boundary_judge = boundary_judge
         self.state_updater = state_updater
+        self.unified_controller = unified_controller
         self.top_k = top_k
         self.memory_text_limit = memory_text_limit
         self.anchor = TaskAnchor(
@@ -97,6 +100,10 @@ class OnlineMemorySession:
         self._sequence = 0
         self._known_message_count = 2
         self._pending_switch = LoopBoundaryDecision(False, "initial loop", 1.0)
+        self._controller_query = ""
+        self._controller_selected_ids: list[str] = []
+        self._controller_selected_hits: list[MemoryHit] = []
+        self._controller_succeeded = False
 
     def _event(self, message: dict[str, Any]) -> TrajectoryEvent:
         self._sequence += 1
@@ -144,12 +151,21 @@ class OnlineMemorySession:
             status=MemoryStatus.RESOLVED,
         )
 
-    def _archive_current_loop(self, decision: LoopBoundaryDecision | None = None) -> None:
+    def _archive_current_loop(
+        self,
+        decision: LoopBoundaryDecision | None = None,
+        planned_state_delta: dict[str, Any] | None = None,
+    ) -> None:
         loop = self._materialize_current_loop(decision)
         if loop is None:
             return
         try:
-            update = self.state_updater.update(self.anchor, self.state, loop)
+            if planned_state_delta and planned_state_delta.get("operations"):
+                update = self.state_updater.apply_result(
+                    self.anchor, self.state, loop, planned_state_delta
+                )
+            else:
+                update = self.state_updater.update(self.anchor, self.state, loop)
             self.state = update.state
             loop.state_delta_ids.append(update.delta.delta_id)
             self.deltas.append(update.delta.to_dict())
@@ -165,6 +181,47 @@ class OnlineMemorySession:
         new_messages = canonical_messages[self._known_message_count :]
         self._known_message_count = len(canonical_messages)
         self._pending_switch = LoopBoundaryDecision(False, "same loop", 0.5)
+        self._controller_succeeded = False
+        self._controller_query = ""
+        self._controller_selected_ids = []
+        self._controller_selected_hits = []
+        if self.unified_controller and new_messages:
+            latest_events = [self._event(message) for message in new_messages]
+            latest_text = "\n".join(event.text for event in latest_events)
+            seed_query = build_retrieval_query(self.anchor, self.state, latest_text)
+            candidates = self.index.search(seed_query, top_k=12, task_id=self.task_id)
+            try:
+                control = self.unified_controller.decide(
+                    anchor=self.anchor,
+                    state=self.state,
+                    current_loop=self.current_events,
+                    latest_events=latest_events,
+                    candidates=candidates,
+                )
+                decision = LoopBoundaryDecision(
+                    split=control.switch_loop,
+                    reason=control.reason,
+                    confidence=control.confidence,
+                    current_loop_subgoal=control.current_loop_subgoal,
+                    next_loop_subgoal=control.next_loop_subgoal,
+                )
+                self._pending_switch = decision
+                self._controller_query = control.retrieval_query
+                self._controller_selected_ids = control.selected_memory_ids
+                by_id = {hit.memory_id: hit for hit in candidates}
+                self._controller_selected_hits = [
+                    by_id[memory_id]
+                    for memory_id in control.selected_memory_ids
+                    if memory_id in by_id
+                ]
+                self._controller_succeeded = True
+                if decision.split and self.current_events:
+                    self._archive_current_loop(decision, control.state_delta)
+            except Exception as exc:
+                self._pending_switch = LoopBoundaryDecision(False, "controller fallback", 0.0)
+                self._pending_switch.controller_error = f"unified_controller:{exc.__class__.__name__}"
+            self.current_events.extend(latest_events)
+            return
         for message in new_messages:
             event = self._event(message)
             if event.role == "assistant" and self.current_events:
@@ -221,8 +278,12 @@ class OnlineMemorySession:
     def build_prompt(self, canonical_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         self.ingest_new_messages(canonical_messages)
         recent_event = self.current_events[-1].text if self.current_events else "start research"
-        query = build_retrieval_query(self.anchor, self.state, recent_event)
-        hits = self.index.search(query, top_k=self.top_k, task_id=self.task_id)
+        query = self._controller_query or build_retrieval_query(self.anchor, self.state, recent_event)
+        candidates = self.index.search(query, top_k=max(self.top_k, 12), task_id=self.task_id)
+        if self._controller_succeeded:
+            hits = self._controller_selected_hits
+        else:
+            hits = candidates[: self.top_k]
         system = dict(canonical_messages[0])
         system["content"] = str(system.get("content") or "") + self._memory_block(query, hits)
         prompt_messages = [system, dict(canonical_messages[1])]

@@ -29,6 +29,7 @@ from cl_gism import (  # noqa: E402
     LLMStateUpdater,
     OnlineMemorySession,
     OpenAIChatJSONClient,
+    UnifiedMemoryController,
 )
 
 
@@ -44,12 +45,26 @@ class MemoryTokenizerRouter:
         self.top_k = int(os.environ.get("CL_GISM_MEMORY_TOP_K", "4"))
         self.memory_text_limit = int(os.environ.get("CL_GISM_MEMORY_TEXT_LIMIT", "1800"))
         self.trace_dir = Path(os.environ.get("CL_GISM_TRACE_DIR", "memory_traces"))
+        controller_key = os.environ.get("CL_GISM_CONTROLLER_API_KEY")
+        controller_url = os.environ.get("CL_GISM_CONTROLLER_BASE_URL")
+        controller_model = os.environ.get("CL_GISM_CONTROLLER_MODEL", "mimo-v2.5-pro")
+        if not controller_key or not controller_url:
+            raise RuntimeError(
+                "CL_GISM_CONTROLLER_API_KEY and CL_GISM_CONTROLLER_BASE_URL are required"
+            )
         self.client = OpenAIChatJSONClient(
-            api_key=os.environ.get("OPENAI_API_KEY", "EMPTY"),
-            model=model,
-            base_url=self.base_url,
+            api_key=controller_key,
+            model=controller_model,
+            base_url=controller_url,
             timeout_seconds=float(os.environ.get("CL_GISM_CONTROLLER_TIMEOUT_SECONDS", "300")),
             max_tokens=int(os.environ.get("CL_GISM_CONTROLLER_MAX_TOKENS", "2048")),
+        )
+        self.unified_controller = UnifiedMemoryController(
+            self.client, max_selected_memories=self.top_k
+        )
+        print(
+            f"[CL-GISM] controller model={controller_model} base_url={controller_url} "
+            f"top_k={self.top_k}"
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -64,6 +79,7 @@ class MemoryTokenizerRouter:
                 system_prompt=system_prompt,
                 boundary_judge=LLMLoopBoundaryJudge(self.client),
                 state_updater=LLMStateUpdater(self.client),
+                unified_controller=self.unified_controller,
                 top_k=self.top_k,
                 memory_text_limit=self.memory_text_limit,
             )

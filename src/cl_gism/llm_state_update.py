@@ -362,14 +362,24 @@ class LLMStateUpdater:
         system_prompt, user_prompt = self._build_prompts(anchor, previous, loop)
         try:
             raw_result = self.client.complete_json(system_prompt, user_prompt)
-            plan = _parse_plan(raw_result)
-            if len(plan.operations) > self.max_operations:
-                plan.operations = plan.operations[: self.max_operations]
-            if not plan.operations:
-                raise ValueError("LLM returned no operations")
-            return _apply_planned_operations(anchor, previous, loop, plan)
+            return self.apply_result(anchor, previous, loop, raw_result)
         except Exception:  # pragma: no cover - network and parse fallback path
             return self.fallback.update(anchor, previous, loop)
+
+    def apply_result(
+        self,
+        anchor: TaskAnchor,
+        previous: GlobalIntentState,
+        loop: LoopMemory,
+        raw_result: dict[str, Any],
+    ) -> StateUpdateResult:
+        """Apply an already generated StateDelta plan without another LLM call."""
+        plan = _parse_plan(raw_result)
+        if len(plan.operations) > self.max_operations:
+            plan.operations = plan.operations[: self.max_operations]
+        if not plan.operations:
+            raise ValueError("LLM returned no operations")
+        return _apply_planned_operations(anchor, previous, loop, plan)
 
 
 __all__ = [

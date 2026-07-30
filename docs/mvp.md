@@ -37,3 +37,24 @@ PYTHONPATH=src python examples/run_mvp.py
 - 可以用 `examples/run_llm_loop.py` 单独查看 loop 切分结果。
 - 如果设置了 `OPENAI_API_KEY`，可以用 `examples/run_llm_rerank.py` 让模型先对候选记忆重排；默认模型是 `gpt-5.6-terra`，可用 `CL_GISM_OPENAI_MODEL` 覆盖。
 - 如果设置了 `OPENAI_API_KEY`，可以用 `examples/run_llm_state_update.py` 让模型决定 `StateDelta`；默认同样是 `gpt-5.6-terra`。
+
+## OpenResearcher 在线 API Controller
+
+在线实验将研究面与控制面分开：OpenResearcher-30B-A3B 只负责研究和工具调用，外部 API
+模型每轮用一次结构化调用同时决定 Loop 边界、StateDelta 与进入下一轮的 Memory IDs。
+
+服务器凭证必须放在仓库外的权限文件中。可参考 `configs/controller.env.example`，默认位置为：
+
+```text
+/file_storage01/home/juanliu/.config/cl-gism/controller.env
+```
+
+然后运行：
+
+```bash
+sbatch --export=ALL,SMOKE_SIZE=1,MAX_CONCURRENCY=1 \
+  scripts/slurm/openresearcher_browsecomp_plus_memory.sbatch
+```
+
+完整轨迹仍写入 OpenResearcher JSONL；Global State、Loop、StateDelta 和逐轮检索选择另外写入
+`results/memory_traces/<job-id>/`，API Key 不进入任何结果文件。

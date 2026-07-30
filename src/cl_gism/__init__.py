@@ -23,6 +23,7 @@ from .retrieval import LexicalMemoryIndex, MemoryHit, build_retrieval_query, pac
 from .state_update import HeuristicStateUpdater, StateUpdateResult
 from .trajectory import ParsedTrajectory, RuleBasedLoopBuilder, TrajectoryEvent, parse_openresearcher_row
 from .online import OnlineMemorySession, OnlineMemoryTrace
+from .unified_controller import UnifiedControlDecision, UnifiedMemoryController
 
 __all__ = [
     "DeltaOperation",
@@ -61,4 +62,6 @@ __all__ = [
     "parse_openresearcher_row",
     "OnlineMemorySession",
     "OnlineMemoryTrace",
+    "UnifiedControlDecision",
+    "UnifiedMemoryController",
 ]
