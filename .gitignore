@@ -1,0 +1,51 @@
+# Python bytecode and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Python environments and build artifacts
+.venv/
+venv/
+.python-version
+*.egg-info/
+build/
+dist/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Editors and operating-system files
+.DS_Store
+.idea/
+.vscode/
+
+# Downloaded datasets. Keep large benchmark data outside Git.
+data/
+
+# OpenResearcher is an isolated, nested upstream repository.
+vendor/openresearcher/
+
+# Models, checkpoints, and Hugging Face caches
+models/
+checkpoints/
+.cache/
+huggingface/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+
+# Experiment and service outputs
+results/
+outputs/
+logs/
+*.log
+
+# BrowseComp-Plus assets if downloaded outside the vendor repository
+Tevatron/
