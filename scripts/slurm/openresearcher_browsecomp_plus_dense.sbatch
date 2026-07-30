@@ -107,6 +107,16 @@ else
 fi
 DENSE_MODEL_REF=${DENSE_MODEL_REF:-$DEFAULT_DENSE_MODEL_REF}
 
+if [[ "$OFFLINE_MODE" == "1" && ! -d "$DENSE_MODEL_REF" ]]; then
+  if ! "$VENV_PYTHON" -c \
+    'import sys; from huggingface_hub import snapshot_download; print(snapshot_download(sys.argv[1], local_files_only=True))' \
+    "$DENSE_MODEL_REF"; then
+    echo "Dense embedding model is not available locally: $DENSE_MODEL_REF" >&2
+    echo "Download Qwen/Qwen3-Embedding-8B or set DENSE_MODEL_REF to its local directory." >&2
+    exit 1
+  fi
+fi
+
 shopt -s nullglob
 TEST_FILES=(Tevatron/browsecomp-plus/data/*.parquet)
 CORPUS_FILES=(Tevatron/browsecomp-plus-corpus/data/*.parquet)
@@ -236,6 +246,10 @@ CUDA_VISIBLE_DEVICES=$DENSE_GPU \
 SEARCH_PID=$!
 SERVICE_PIDS+=("$SEARCH_PID")
 
+# Validate retrieval before loading two large generation-model replicas. This
+# avoids wasting four GPUs if the corpus, index, or embedding model is invalid.
+wait_for_service "Dense search" "http://127.0.0.1:${SEARCH_PORT}/" "$SEARCH_PID" "$SEARCH_LOG"
+
 # Two OpenResearcher model servers, each using tensor parallelism across two GPUs.
 VLLM1_LOG=${SERVICE_LOG_DIR}/vllm-${VLLM1_PORT}.log
 CUDA_VISIBLE_DEVICES=$VLLM1_GPUS \
@@ -265,7 +279,6 @@ CUDA_VISIBLE_DEVICES=$VLLM2_GPUS \
 VLLM2_PID=$!
 SERVICE_PIDS+=("$VLLM2_PID")
 
-wait_for_service "Dense search" "http://127.0.0.1:${SEARCH_PORT}/" "$SEARCH_PID" "$SEARCH_LOG"
 wait_for_service "vLLM server 1" "http://127.0.0.1:${VLLM1_PORT}/v1/models" "$VLLM1_PID" "$VLLM1_LOG"
 wait_for_service "vLLM server 2" "http://127.0.0.1:${VLLM2_PORT}/v1/models" "$VLLM2_PID" "$VLLM2_LOG"
 
