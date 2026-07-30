@@ -288,6 +288,10 @@ if [[ "$RUN_MODE" == "smoke" ]]; then
   mkdir -p "$SMOKE_DIR"
 
   if [[ ! -f "$SMOKE_FILE" ]]; then
+    # Some pyarrow builds finish writing the parquet file, then segfault during
+    # interpreter shutdown. Do not discard a successfully written smoke file in
+    # that case, but still fail if no usable output was produced.
+    set +e
     SMOKE_SIZE="$SMOKE_SIZE" SMOKE_FILE="$SMOKE_FILE" "$VENV_PYTHON" - <<'PY'
 import glob
 import os
@@ -302,6 +306,19 @@ table = ds.dataset(source_files, format="parquet").head(size)
 pq.write_table(table, output_file)
 print(f"Created smoke dataset: {output_file} ({table.num_rows} rows)")
 PY
+    SMOKE_CREATE_STATUS=$?
+    set -e
+
+    if (( SMOKE_CREATE_STATUS != 0 )); then
+      if [[ -s "$SMOKE_FILE" ]]; then
+        echo "Warning: smoke dataset writer exited with status ${SMOKE_CREATE_STATUS}, but produced a non-empty file; continuing."
+      else
+        echo "ERROR: smoke dataset creation failed with status ${SMOKE_CREATE_STATUS} and produced no usable file." >&2
+        exit "$SMOKE_CREATE_STATUS"
+      fi
+    fi
+  else
+    echo "Reusing existing smoke dataset: $SMOKE_FILE"
   fi
   DATA_PATH=$SMOKE_FILE
 else
