@@ -84,6 +84,16 @@ if [[ "$OFFLINE_MODE" == "1" ]]; then
   export HF_DATASETS_OFFLINE=1
 fi
 
+# PyJNIus does not discover Conda's OpenJDK layout reliably. Locate libjvm.so
+# explicitly so importing Pyserini works for both BM25 and Dense backends.
+JVM_PATH=$(find -L "$JAVA_HOME" -type f -name libjvm.so -print -quit)
+if [[ -z "$JVM_PATH" ]]; then
+  echo "Unable to find libjvm.so below JAVA_HOME=$JAVA_HOME" >&2
+  exit 1
+fi
+export JVM_PATH
+export LD_LIBRARY_PATH="$(dirname "$JVM_PATH"):${LD_LIBRARY_PATH:-}"
+
 LOCAL_DENSE_MODEL=${OPENRESEARCHER_ROOT}/models/Qwen3-Embedding-8B
 if [[ -d "$LOCAL_DENSE_MODEL" ]]; then
   DEFAULT_DENSE_MODEL_REF=$LOCAL_DENSE_MODEL
@@ -142,6 +152,8 @@ echo "run_mode=$RUN_MODE"
 echo "project_root=$OPENRESEARCHER_ROOT"
 echo "openresearcher_model=$OPENRESEARCHER_MODEL_REF"
 echo "dense_model=$DENSE_MODEL_REF"
+echo "java_home=$JAVA_HOME"
+echo "jvm_path=$JVM_PATH"
 echo "allocated_gpus=$ALLOCATED_GPU_CSV"
 echo "vllm_1_gpus=$VLLM1_GPUS port=$VLLM1_PORT"
 echo "vllm_2_gpus=$VLLM2_GPUS port=$VLLM2_PORT"
