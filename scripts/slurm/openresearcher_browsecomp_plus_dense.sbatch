@@ -24,6 +24,9 @@ set -euo pipefail
 
 OPENRESEARCHER_ROOT=${OPENRESEARCHER_ROOT:-/file_storage01/home/juanliu/25_ymj/memory/memory/vendor/openresearcher}
 OPENRESEARCHER_MODEL_REF=${OPENRESEARCHER_MODEL_REF:-${OPENRESEARCHER_ROOT}/models/OpenResearcher-30B-A3B}
+PROJECT_ROOT=${PROJECT_ROOT:-$(cd "${OPENRESEARCHER_ROOT}/../.." && pwd)}
+EXPERIMENT_NAME=${EXPERIMENT_NAME:-baseline_dense}
+AGENT_ENTRYPOINT=${AGENT_ENTRYPOINT:-${OPENRESEARCHER_ROOT}/deploy_agent.py}
 RUN_MODE=${RUN_MODE:-smoke}
 SMOKE_SIZE=${SMOKE_SIZE:-10}
 OFFLINE_MODE=${OFFLINE_MODE:-1}
@@ -35,10 +38,10 @@ fi
 
 if [[ "$RUN_MODE" == "smoke" ]]; then
   MAX_CONCURRENCY=${MAX_CONCURRENCY:-2}
-  OUTPUT_DIR=${OUTPUT_DIR:-${OPENRESEARCHER_ROOT}/results/smoke/baseline_dense}
+  OUTPUT_DIR=${OUTPUT_DIR:-${OPENRESEARCHER_ROOT}/results/smoke/${EXPERIMENT_NAME}}
 else
   MAX_CONCURRENCY=${MAX_CONCURRENCY:-8}
-  OUTPUT_DIR=${OUTPUT_DIR:-${OPENRESEARCHER_ROOT}/results/browsecomp-plus/baseline_dense}
+  OUTPUT_DIR=${OUTPUT_DIR:-${OPENRESEARCHER_ROOT}/results/browsecomp-plus/${EXPERIMENT_NAME}}
 fi
 
 if [[ ! -d "$OPENRESEARCHER_ROOT" ]]; then
@@ -56,6 +59,10 @@ fi
 if [[ ! -d "$OPENRESEARCHER_MODEL_REF" ]]; then
   echo "OpenResearcher model not found: $OPENRESEARCHER_MODEL_REF" >&2
   echo "Set OPENRESEARCHER_MODEL_REF to the downloaded model directory." >&2
+  exit 1
+fi
+if [[ ! -f "$AGENT_ENTRYPOINT" ]]; then
+  echo "Agent entrypoint not found: $AGENT_ENTRYPOINT" >&2
   exit 1
 fi
 
@@ -82,6 +89,7 @@ export HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT:-60}
 # local Dense backend never uses it. A non-secret placeholder prevents that
 # optional module from aborting import; a real key is only needed by eval.py.
 export OPENAI_API_KEY=${OPENAI_API_KEY:-EMPTY}
+export PYTHONPATH="${PROJECT_ROOT}/src:${OPENRESEARCHER_ROOT}:${PYTHONPATH:-}"
 
 if [[ "$OFFLINE_MODE" == "1" ]]; then
   export TRANSFORMERS_OFFLINE=1
@@ -164,7 +172,10 @@ mkdir -p "$SERVICE_LOG_DIR" "$OUTPUT_DIR"
 echo "===== OPENRESEARCHER BROWSECOMP-PLUS CONFIG ====="
 echo "job_id=$JOB_NUMBER"
 echo "run_mode=$RUN_MODE"
+echo "experiment_name=$EXPERIMENT_NAME"
 echo "project_root=$OPENRESEARCHER_ROOT"
+echo "main_project_root=$PROJECT_ROOT"
+echo "agent_entrypoint=$AGENT_ENTRYPOINT"
 echo "openresearcher_model=$OPENRESEARCHER_MODEL_REF"
 echo "dense_model=$DENSE_MODEL_REF"
 echo "java_home=$JAVA_HOME"
@@ -328,7 +339,7 @@ fi
 VLLM_SERVER_URLS="http://127.0.0.1:${VLLM1_PORT}/v1,http://127.0.0.1:${VLLM2_PORT}/v1"
 
 echo "Starting OpenResearcher agent..."
-"$VENV_PYTHON" deploy_agent.py \
+"$VENV_PYTHON" "$AGENT_ENTRYPOINT" \
   --output_dir "$OUTPUT_DIR" \
   --model_name_or_path "$OPENRESEARCHER_MODEL_REF" \
   --search_url "http://127.0.0.1:${SEARCH_PORT}" \

@@ -22,6 +22,7 @@ from .llm_state_update import LLMStateUpdater, PlannedStateOperation, StateDelta
 from .retrieval import LexicalMemoryIndex, MemoryHit, build_retrieval_query, pack_context
 from .state_update import HeuristicStateUpdater, StateUpdateResult
 from .trajectory import ParsedTrajectory, RuleBasedLoopBuilder, TrajectoryEvent, parse_openresearcher_row
+from .online import OnlineMemorySession, OnlineMemoryTrace
 
 __all__ = [
     "DeltaOperation",
@@ -58,4 +59,6 @@ __all__ = [
     "RuleBasedLoopBuilder",
     "TrajectoryEvent",
     "parse_openresearcher_row",
+    "OnlineMemorySession",
+    "OnlineMemoryTrace",
 ]

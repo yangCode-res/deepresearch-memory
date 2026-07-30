@@ -84,11 +84,13 @@ class OpenAIChatJSONClient:
         model: str = DEFAULT_MODEL,
         base_url: str = DEFAULT_BASE_URL,
         timeout_seconds: float = 60.0,
+        max_tokens: int = 2048,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.max_tokens = max_tokens
 
     @classmethod
     def from_env(cls, *, model: str | None = None, base_url: str | None = None) -> "OpenAIChatJSONClient" | None:
@@ -100,6 +102,7 @@ class OpenAIChatJSONClient:
             model=model or os.getenv("CL_GISM_OPENAI_MODEL") or DEFAULT_MODEL,
             base_url=base_url or os.getenv("CL_GISM_OPENAI_BASE_URL") or DEFAULT_BASE_URL,
             timeout_seconds=float(os.getenv("CL_GISM_OPENAI_TIMEOUT_SECONDS", "60")),
+            max_tokens=int(os.getenv("CL_GISM_OPENAI_MAX_TOKENS", "2048")),
         )
 
     def complete_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:
@@ -110,6 +113,7 @@ class OpenAIChatJSONClient:
                 {"role": "user", "content": user_prompt},
             ],
             "temperature": 0,
+            "max_tokens": self.max_tokens,
             "response_format": {"type": "json_object"},
         }
         request = urllib.request.Request(
