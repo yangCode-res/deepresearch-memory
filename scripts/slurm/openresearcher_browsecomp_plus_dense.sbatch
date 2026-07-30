@@ -63,6 +63,12 @@ source /file_storage01/home/juanliu/miniconda3/etc/profile.d/conda.sh
 conda activate openresearcher312
 CONDA_ENV_ROOT=$CONDA_PREFIX
 source .venv/bin/activate
+VENV_PYTHON=${OPENRESEARCHER_ROOT}/.venv/bin/python
+
+if [[ ! -x "$VENV_PYTHON" ]]; then
+  echo "Virtual-environment Python is not executable: $VENV_PYTHON" >&2
+  exit 1
+fi
 
 export JAVA_HOME=$CONDA_ENV_ROOT
 export PATH="${JAVA_HOME}/bin:/persist_data/home/juanliu/.local/bin:${PATH}"
@@ -146,7 +152,8 @@ echo "output_dir=$OUTPUT_DIR"
 echo "================================================="
 
 nvidia-smi
-python -c "import torch; print('CUDA available:', torch.cuda.is_available(), 'visible GPU count:', torch.cuda.device_count())"
+"$VENV_PYTHON" -c "import sys; print('Python executable:', sys.executable); print('Python version:', sys.version)"
+"$VENV_PYTHON" -c "import torch; print('Torch version:', torch.__version__); print('CUDA available:', torch.cuda.is_available(), 'visible GPU count:', torch.cuda.device_count())"
 java -version
 
 SERVICE_PIDS=()
@@ -205,7 +212,7 @@ export GPU_IDS=0
 
 SEARCH_LOG=${SERVICE_LOG_DIR}/dense-search.log
 CUDA_VISIBLE_DEVICES=$DENSE_GPU \
-  uvicorn scripts.deploy_search_service:app \
+  "$VENV_PYTHON" -m uvicorn scripts.deploy_search_service:app \
     --host 127.0.0.1 \
     --port "$SEARCH_PORT" \
     >"$SEARCH_LOG" 2>&1 &
@@ -215,7 +222,7 @@ SERVICE_PIDS+=("$SEARCH_PID")
 # Two OpenResearcher model servers, each using tensor parallelism across two GPUs.
 VLLM1_LOG=${SERVICE_LOG_DIR}/vllm-${VLLM1_PORT}.log
 CUDA_VISIBLE_DEVICES=$VLLM1_GPUS \
-  python -m vllm.entrypoints.openai.api_server \
+  "$VENV_PYTHON" -m vllm.entrypoints.openai.api_server \
     --model "$OPENRESEARCHER_MODEL_REF" \
     --host 127.0.0.1 \
     --port "$VLLM1_PORT" \
@@ -229,7 +236,7 @@ SERVICE_PIDS+=("$VLLM1_PID")
 
 VLLM2_LOG=${SERVICE_LOG_DIR}/vllm-${VLLM2_PORT}.log
 CUDA_VISIBLE_DEVICES=$VLLM2_GPUS \
-  python -m vllm.entrypoints.openai.api_server \
+  "$VENV_PYTHON" -m vllm.entrypoints.openai.api_server \
     --model "$OPENRESEARCHER_MODEL_REF" \
     --host 127.0.0.1 \
     --port "$VLLM2_PORT" \
@@ -251,7 +258,7 @@ if [[ "$RUN_MODE" == "smoke" ]]; then
   mkdir -p "$SMOKE_DIR"
 
   if [[ ! -f "$SMOKE_FILE" ]]; then
-    SMOKE_SIZE="$SMOKE_SIZE" SMOKE_FILE="$SMOKE_FILE" python - <<'PY'
+    SMOKE_SIZE="$SMOKE_SIZE" SMOKE_FILE="$SMOKE_FILE" "$VENV_PYTHON" - <<'PY'
 import glob
 import os
 
@@ -274,7 +281,7 @@ fi
 VLLM_SERVER_URLS="http://127.0.0.1:${VLLM1_PORT}/v1,http://127.0.0.1:${VLLM2_PORT}/v1"
 
 echo "Starting OpenResearcher agent..."
-python deploy_agent.py \
+"$VENV_PYTHON" deploy_agent.py \
   --output_dir "$OUTPUT_DIR" \
   --model_name_or_path "$OPENRESEARCHER_MODEL_REF" \
   --search_url "http://127.0.0.1:${SEARCH_PORT}" \
