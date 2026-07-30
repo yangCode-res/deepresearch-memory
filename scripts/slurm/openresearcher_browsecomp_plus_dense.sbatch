@@ -78,6 +78,11 @@ export HF_HUB_DISABLE_XET=${HF_HUB_DISABLE_XET:-1}
 export HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT:-600}
 export HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT:-60}
 
+# Pyserini 2.0 imports its optional OpenAI encoder eagerly, even when the
+# local Dense backend never uses it. A non-secret placeholder prevents that
+# optional module from aborting import; a real key is only needed by eval.py.
+export OPENAI_API_KEY=${OPENAI_API_KEY:-EMPTY}
+
 if [[ "$OFFLINE_MODE" == "1" ]]; then
   export TRANSFORMERS_OFFLINE=1
   export HF_HUB_OFFLINE=1
