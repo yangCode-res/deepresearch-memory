@@ -58,6 +58,7 @@ class OnlineMemoryTrace:
     loop_switched: bool = False
     loop_reason: str = ""
     controller_error: str | None = None
+    controller_validation_retries: int = 0
 
 
 class OnlineMemorySession:
@@ -104,6 +105,7 @@ class OnlineMemorySession:
         self._controller_selected_ids: list[str] = []
         self._controller_selected_hits: list[MemoryHit] = []
         self._controller_succeeded = False
+        self._last_control = None
 
     def _event(self, message: dict[str, Any]) -> TrajectoryEvent:
         self._sequence += 1
@@ -155,10 +157,10 @@ class OnlineMemorySession:
         self,
         decision: LoopBoundaryDecision | None = None,
         planned_state_delta: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         loop = self._materialize_current_loop(decision)
         if loop is None:
-            return
+            return False
         try:
             if planned_state_delta and planned_state_delta.get("operations"):
                 update = self.state_updater.apply_result(
@@ -171,17 +173,27 @@ class OnlineMemorySession:
             self.deltas.append(update.delta.to_dict())
         except Exception as exc:
             self._pending_switch.controller_error = f"state_update:{exc.__class__.__name__}"
+            try:
+                update = self.state_updater.fallback.update(self.anchor, self.state, loop)
+                self.state = update.state
+                loop.state_delta_ids.append(update.delta.delta_id)
+                self.deltas.append(update.delta.to_dict())
+            except Exception as fallback_exc:
+                self._pending_switch.controller_error += f"/fallback:{fallback_exc.__class__.__name__}"
+                return False
         for event in self.current_events:
             self.index.add_raw(event.raw_memory)
         self.index.add_loop(loop)
         self.completed_loops.append(loop)
         self.current_events = []
+        return True
 
     def ingest_new_messages(self, canonical_messages: list[dict[str, Any]]) -> None:
         new_messages = canonical_messages[self._known_message_count :]
         self._known_message_count = len(canonical_messages)
         self._pending_switch = LoopBoundaryDecision(False, "same loop", 0.5)
         self._controller_succeeded = False
+        self._last_control = None
         self._controller_query = ""
         self._controller_selected_ids = []
         self._controller_selected_hits = []
@@ -198,6 +210,7 @@ class OnlineMemorySession:
                     latest_events=latest_events,
                     candidates=candidates,
                 )
+                self._last_control = control
                 decision = LoopBoundaryDecision(
                     split=control.switch_loop,
                     reason=control.reason,
@@ -216,7 +229,9 @@ class OnlineMemorySession:
                 ]
                 self._controller_succeeded = True
                 if decision.split and self.current_events:
-                    self._archive_current_loop(decision, control.state_delta)
+                    archived = self._archive_current_loop(decision, control.state_delta)
+                    if not archived:
+                        decision.split = False
             except Exception as exc:
                 self._pending_switch = LoopBoundaryDecision(False, "controller fallback", 0.0)
                 self._pending_switch.controller_error = f"unified_controller:{exc.__class__.__name__}"
@@ -300,6 +315,9 @@ class OnlineMemorySession:
                 loop_switched=self._pending_switch.split,
                 loop_reason=self._pending_switch.reason,
                 controller_error=getattr(self._pending_switch, "controller_error", None),
+                controller_validation_retries=getattr(
+                    getattr(self, "_last_control", None), "validation_retries", 0
+                ),
             )
         )
         return prompt_messages

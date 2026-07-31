@@ -154,8 +154,8 @@ def _parse_plan(raw: dict[str, Any]) -> StateDeltaPlan:
     summary = str(raw.get("summary") or "").strip()
     operations: list[PlannedStateOperation] = []
     raw_operations = raw.get("operations")
-    if not isinstance(raw_operations, list) or not raw_operations:
-        raise ValueError("LLM state plan did not contain operations")
+    if not isinstance(raw_operations, list):
+        raise ValueError("LLM state plan operations must be a list")
     for entry in raw_operations:
         if not isinstance(entry, dict):
             raise ValueError("LLM state plan operations must be objects")
@@ -377,8 +377,6 @@ class LLMStateUpdater:
         plan = _parse_plan(raw_result)
         if len(plan.operations) > self.max_operations:
             plan.operations = plan.operations[: self.max_operations]
-        if not plan.operations:
-            raise ValueError("LLM returned no operations")
         return _apply_planned_operations(anchor, previous, loop, plan)
 
 

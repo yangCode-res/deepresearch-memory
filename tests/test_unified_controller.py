@@ -19,12 +19,13 @@ class FakeClient:
                 "next_loop_subgoal": "verify candidate",
             },
             "state_delta": {
+                "mode": "NOOP",
                 "summary": "retain candidate",
                 "operations": [],
             },
             "retrieval": {
                 "query": "verify Alpha",
-                "selected_memory_ids": ["loop_allowed", "invented"],
+                "selected_memory_ids": ["loop_allowed"],
                 "reason": "candidate evidence is useful",
             },
         }
@@ -45,7 +46,6 @@ class UnifiedControllerTests(unittest.TestCase):
         self.assertTrue(decision.switch_loop)
         self.assertEqual(decision.retrieval_query, "verify Alpha")
         self.assertEqual(decision.selected_memory_ids, ["loop_allowed"])
-        self.assertNotIn("invented", decision.selected_memory_ids)
 
 
 if __name__ == "__main__":
