@@ -132,6 +132,24 @@ class OnlineMemorySession:
         self._stagnant_rounds = 0
         self._just_archived_memory_ids: list[str] = []
 
+    def _evidence_memory_candidates(self, query: str, limit: int = 12) -> list[MemoryHit]:
+        """Recall evidence-bearing memories, excluding assistant narration.
+
+        Lexical overlap in an agent's old search plan is especially prone to
+        reinforcing a wrong direction. Completed-loop summaries and raw tool
+        observations retain the evidence while avoiding that feedback loop.
+        """
+
+        broad_pool = self.index.search(
+            query,
+            top_k=max(limit * 3, limit),
+            task_id=self.task_id,
+        )
+        return [
+            hit for hit in broad_pool
+            if hit.memory_type == "loop" or hit.metadata.get("source_type") == "tool"
+        ][:limit]
+
     def _event(self, message: dict[str, Any]) -> TrajectoryEvent:
         self._sequence += 1
         role = str(message.get("role") or "unknown")
@@ -258,7 +276,7 @@ class OnlineMemorySession:
             latest_events = [self._event(message) for message in new_messages]
             latest_text = "\n".join(event.text for event in latest_events)
             seed_query = build_retrieval_query(self.anchor, self.state, latest_text)
-            candidates = self.index.search(seed_query, top_k=12, task_id=self.task_id)
+            candidates = self._evidence_memory_candidates(seed_query)
             try:
                 control = self.unified_controller.decide(
                     anchor=self.anchor,
@@ -320,7 +338,6 @@ class OnlineMemorySession:
                             "rejected_hypotheses",
                             "blocked_subgoals",
                             "promising_leads",
-                            "prioritized_open_aspects",
                             "research_direction",
                             "avoid",
                         ):
@@ -422,18 +439,14 @@ class OnlineMemorySession:
         ]
         if direction.get("objective"):
             lines.append(f"Research objective: {direction['objective']}")
-        must_investigate = [
-            str(item).strip()
-            for item in direction.get("must_investigate") or []
-            if str(item).strip()
-        ]
-        if must_investigate:
-            lines.append("Must investigate before broad exploration: " + "; ".join(must_investigate))
         if direction.get("rationale"):
             lines.append(f"Why this direction matters: {direction['rationale']}")
         if direction.get("stop_condition"):
             lines.append(f"Stop this research direction when: {direction['stop_condition']}")
-        leads = progress.get("promising_leads") or []
+        leads = [
+            item for item in progress.get("promising_leads") or []
+            if isinstance(item, dict) and item.get("status") in {"ACTIVE", "VERIFIED"}
+        ]
         if leads:
             lead_names = [
                 str(item.get("entity") or item.get("source") or "").strip()
@@ -442,7 +455,10 @@ class OnlineMemorySession:
             ]
             lead_names = [item for item in lead_names if item]
             if lead_names:
-                lines.append("Promising leads to exploit: " + "; ".join(lead_names))
+                lines.append(
+                    "Evidence-backed candidate hypotheses (optional, reassess against new evidence): "
+                    + "; ".join(lead_names)
+                )
         avoid = [str(item).strip() for item in progress.get("avoid") or [] if str(item).strip()]
         rejected = [
             str(item).strip()
@@ -464,7 +480,8 @@ class OnlineMemorySession:
                 "failed query; exploit a promising result or change strategy."
             )
         lines.append(
-            "You own the concrete research action: choose the browser tool, source, URL, and exact "
+            "No candidate is mandatory; retire one when evidence does not improve. You own the concrete "
+            "research action: choose the browser tool, source, URL, and exact "
             "query yourself. The memory controller supplies direction and constraints only."
         )
         return "\n".join(lines)
@@ -491,7 +508,17 @@ class OnlineMemorySession:
                 "task_status": self._task_status,
                 "research_phase": self._research_phase,
                 "current_loop_subgoal": self._current_loop_subgoal,
-                "loop_working_state": self._loop_progress,
+                "loop_working_state": {
+                    "completion_test": self._loop_progress.get("completion_test", ""),
+                    "progress_summary": self._loop_progress.get("progress_summary", ""),
+                    "resolved_aspects": self._loop_progress.get("resolved_aspects", []),
+                    "open_aspects": self._loop_progress.get("open_aspects", []),
+                    "key_evidence": self._loop_progress.get("key_evidence", []),
+                    "candidate_answer": self._loop_progress.get("candidate_answer", ""),
+                    "promising_leads": self._loop_progress.get("promising_leads", []),
+                    "rejected_hypotheses": self._loop_progress.get("rejected_hypotheses", []),
+                    "avoid": self._loop_progress.get("avoid", []),
+                },
                 "loop_runtime": {
                     "rounds_in_current_loop": self._loop_rounds,
                     "rounds_without_material_progress": self._stagnant_rounds,
@@ -519,7 +546,7 @@ class OnlineMemorySession:
         self.ingest_new_messages(canonical_messages)
         recent_event = self.current_events[-1].text if self.current_events else "start research"
         query = self._controller_query or build_retrieval_query(self.anchor, self.state, recent_event)
-        candidates = self.index.search(query, top_k=max(self.top_k, 12), task_id=self.task_id)
+        candidates = self._evidence_memory_candidates(query, limit=max(self.top_k, 12))
         if self._controller_succeeded:
             handoff_hits = self.index.lookup(self._just_archived_memory_ids)
             combined = [*handoff_hits, *self._controller_selected_hits]
@@ -532,8 +559,13 @@ class OnlineMemorySession:
                 hits.append(hit)
                 if len(hits) >= self.top_k:
                     break
-        else:
+        elif self.unified_controller is None:
             hits = candidates[: self.top_k]
+        else:
+            # A failed controller must fail closed. Direct BM25 fallback here
+            # repeatedly injected old lexical matches during API/JSON errors
+            # and amplified stale wrong directions.
+            hits = []
         system = dict(canonical_messages[0])
         has_useful_memory = bool(self.completed_loops or hits or self.state.state_version > 1)
         if has_useful_memory or self._task_status == "READY_TO_ANSWER":

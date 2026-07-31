@@ -58,7 +58,7 @@ class MemoryTokenizerRouter:
             model=controller_model,
             base_url=controller_url,
             timeout_seconds=float(os.environ.get("CL_GISM_CONTROLLER_TIMEOUT_SECONDS", "300")),
-            max_tokens=int(os.environ.get("CL_GISM_CONTROLLER_MAX_TOKENS", "2048")),
+            max_tokens=int(os.environ.get("CL_GISM_CONTROLLER_MAX_TOKENS", "3072")),
         )
         self.unified_controller = UnifiedMemoryController(
             self.client, max_selected_memories=self.top_k
@@ -250,6 +250,10 @@ async def run_one_with_memory(
     router: MemoryTokenizerRouter = generator.tokenizer
     system_prompt = openresearcher.DEVELOPER_CONTENT
     router.register(question=question, qid=qid, system_prompt=system_prompt)
+    effective_max_rounds = min(
+        max_rounds,
+        int(os.environ.get("CL_GISM_MAX_ROUNDS", "60")),
+    )
     try:
         try:
             messages = await _baseline_run_one(
@@ -257,10 +261,18 @@ async def run_one_with_memory(
                 qid=qid,
                 generator=generator,
                 browser_pool=browser_pool,
-                max_rounds=max_rounds,
+                max_rounds=effective_max_rounds,
             )
         except ReadyToAnswerSignal as signal:
             messages = await _force_final_answer(signal, generator)
+        # The vendor loop can stop immediately after a tool result at its turn
+        # limit. That is not a successful model answer; force one evidence-only
+        # synthesis so evaluation receives an actual prediction.
+        if messages and str(messages[-1].get("role") or "") != "assistant":
+            compact_messages = router.sessions[question].build_prompt(messages)
+            messages = await _force_final_answer(
+                ReadyToAnswerSignal(question, messages, compact_messages), generator
+            )
         router.finalize(question, messages)
         return messages
     except Exception:

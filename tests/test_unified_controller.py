@@ -7,6 +7,7 @@ from cl_gism import (
     TaskAnchor,
     UnifiedMemoryController,
 )
+from cl_gism.unified_controller import _normalize_loop_progress
 
 
 class FakeClient:
@@ -44,6 +45,37 @@ class FakeClient:
 
 
 class UnifiedControllerTests(unittest.TestCase):
+    def test_unsupported_lead_expires_and_action_instruction_is_dropped(self):
+        progress = _normalize_loop_progress(
+            {
+                "promising_leads": [
+                    {
+                        "kind": "ENTITY",
+                        "entity": "Civic Tower",
+                        "source": "result 1",
+                        "evidence": "a tower was mentioned",
+                        "status": "ACTIVE",
+                        "confidence": 0.8,
+                    },
+                    {
+                        "kind": "ENTITY",
+                        "entity": "Search for European tower brands",
+                        "source": "assistant plan",
+                        "status": "ACTIVE",
+                        "confidence": 0.9,
+                    },
+                ]
+            },
+            None,
+        )
+        self.assertEqual([lead["entity"] for lead in progress["promising_leads"]], ["Civic Tower"])
+
+        for _ in range(3):
+            progress = _normalize_loop_progress({}, progress)
+
+        self.assertEqual(progress["promising_leads"][0]["status"], "REJECTED")
+        self.assertLessEqual(progress["promising_leads"][0]["confidence"], 0.2)
+
     def test_one_call_controls_loop_state_and_memory_selection(self):
         anchor = TaskAnchor(task_id="task_1", original_goal="Find the answer")
         state = HeuristicStateUpdater().initialize(anchor)
@@ -440,10 +472,7 @@ class UnifiedControllerTests(unittest.TestCase):
             second.loop_progress["promising_leads"][0]["entity"],
             "Vitali Hakko",
         )
-        self.assertEqual(
-            second.loop_progress["research_direction"]["must_investigate"],
-            ["Vitali Hakko"],
-        )
+        self.assertNotIn("must_investigate", second.loop_progress["research_direction"])
         self.assertEqual(client.inputs[1]["loop_runtime"]["rounds_in_current_loop"], 40)
 
 

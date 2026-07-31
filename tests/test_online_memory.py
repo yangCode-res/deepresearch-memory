@@ -298,10 +298,91 @@ class OnlineMemoryTests(unittest.TestCase):
         self.assertEqual(session.traces[-1].current_loop_subgoal, "diagnose database latency")
         self.assertEqual(session.traces[-1].research_phase, "CANDIDATE_VERIFICATION")
         instruction = session._research_instruction()
-        self.assertIn("Must investigate before broad exploration: database dependency trace", instruction)
+        self.assertNotIn("Must investigate", instruction)
+        self.assertIn("candidate hypotheses (optional", instruction)
         self.assertIn("database latency", instruction)
         self.assertIn("Do not repeat: repeat network measurements", instruction)
         self.assertIn("choose the browser tool", instruction)
+
+    def test_controller_failure_does_not_inject_bm25_fallback(self):
+        class SwitchThenFailController:
+            def __init__(self):
+                self.calls = 0
+
+            def decide(self, **kwargs):
+                self.calls += 1
+                if self.calls > 1:
+                    raise ValueError("truncated controller JSON")
+                return UnifiedControlDecision(
+                    task_status="SWITCH_LOOP",
+                    research_phase="DISCOVERY",
+                    switch_loop=True,
+                    current_loop_subgoal="identify a candidate",
+                    next_loop_subgoal="verify the candidate",
+                    loop_outcome="RESOLVED",
+                    boundary_basis="SUBGOAL_COMPLETED",
+                    loop_progress={
+                        "progress_summary": "Alpha appeared in an old result",
+                        "promising_leads": [],
+                        "research_direction": {
+                            "objective": "verify the candidate",
+                            "rationale": "candidate found",
+                            "stop_condition": "candidate verified or rejected",
+                        },
+                    },
+                    state_delta={
+                        "mode": "APPLY",
+                        "summary": "Alpha found",
+                        "operations": [{
+                            "operation": "ADD",
+                            "target": "working_hypotheses",
+                            "value": "Alpha",
+                            "reason": "old tool result",
+                        }],
+                    },
+                )
+
+        session = OnlineMemorySession(
+            qid=46,
+            question="Find the answer",
+            system_prompt="research",
+            boundary_judge=LLMLoopBoundaryJudge(FakeController()),
+            state_updater=LLMStateUpdater(FakeController()),
+            unified_controller=SwitchThenFailController(),
+        )
+        messages = [
+            {"role": "system", "content": "research"},
+            {"role": "user", "content": "Find the answer"},
+            {"role": "assistant", "content": "I found Alpha."},
+            {"role": "tool", "content": "Old result mentions Alpha."},
+        ]
+        session.build_prompt(messages)
+        messages.extend([
+            {"role": "assistant", "content": "Check Alpha again."},
+            {"role": "tool", "content": "No useful new evidence."},
+        ])
+        session.build_prompt(messages)
+
+        self.assertIn("unified_controller:ValueError", session.traces[-1].controller_error)
+        self.assertEqual(session.traces[-1].retrieved_memory_ids, [])
+
+    def test_memory_candidate_recall_excludes_agent_search_narration(self):
+        session = OnlineMemorySession(
+            qid=47,
+            question="Find Alpha",
+            system_prompt="research",
+            boundary_judge=LLMLoopBoundaryJudge(FakeController()),
+            state_updater=LLMStateUpdater(FakeController()),
+        )
+        assistant_event = session._event({"role": "assistant", "content": "Search Alpha tower repeatedly"})
+        tool_event = session._event({"role": "tool", "content": "Alpha appears in source 7"})
+        session.index.add_raw(assistant_event.raw_memory)
+        session.index.add_raw(tool_event.raw_memory)
+
+        hits = session._evidence_memory_candidates("Alpha")
+
+        self.assertEqual(len(hits), 1)
+        self.assertEqual(hits[0].metadata.get("source_type"), "tool")
 
     def test_invalid_controller_delta_archives_with_noop_instead_of_polluting_state(self):
         class SwitchingController:
