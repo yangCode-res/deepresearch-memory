@@ -29,7 +29,13 @@ EXPERIMENT_NAME=${EXPERIMENT_NAME:-baseline_dense}
 AGENT_ENTRYPOINT=${AGENT_ENTRYPOINT:-${OPENRESEARCHER_ROOT}/deploy_agent.py}
 RUN_MODE=${RUN_MODE:-smoke}
 SMOKE_SIZE=${SMOKE_SIZE:-10}
+SMOKE_OFFSET=${SMOKE_OFFSET:-0}
 OFFLINE_MODE=${OFFLINE_MODE:-1}
+
+if ! [[ "$SMOKE_SIZE" =~ ^[1-9][0-9]*$ ]] || ! [[ "$SMOKE_OFFSET" =~ ^[0-9]+$ ]]; then
+  echo "SMOKE_SIZE must be positive and SMOKE_OFFSET must be non-negative" >&2
+  exit 1
+fi
 
 if [[ "$RUN_MODE" != "smoke" && "$RUN_MODE" != "full" ]]; then
   echo "RUN_MODE must be 'smoke' or 'full', got: $RUN_MODE" >&2
@@ -186,6 +192,8 @@ echo "vllm_2_gpus=$VLLM2_GPUS port=$VLLM2_PORT"
 echo "dense_gpu=$DENSE_GPU port=$SEARCH_PORT"
 echo "reserved_gpu=$RESERVED_GPU"
 echo "max_concurrency_per_worker=$MAX_CONCURRENCY"
+echo "smoke_offset=$SMOKE_OFFSET"
+echo "smoke_size=$SMOKE_SIZE"
 echo "output_dir=$OUTPUT_DIR"
 echo "================================================="
 
@@ -295,7 +303,11 @@ wait_for_service "vLLM server 2" "http://127.0.0.1:${VLLM2_PORT}/v1/models" "$VL
 
 if [[ "$RUN_MODE" == "smoke" ]]; then
   SMOKE_DIR=${OPENRESEARCHER_ROOT}/Tevatron/browsecomp-plus-smoke/data
-  SMOKE_FILE=${SMOKE_DIR}/smoke-${SMOKE_SIZE}.parquet
+  if (( SMOKE_OFFSET == 0 )); then
+    SMOKE_FILE=${SMOKE_DIR}/smoke-${SMOKE_SIZE}.parquet
+  else
+    SMOKE_FILE=${SMOKE_DIR}/smoke-offset-${SMOKE_OFFSET}-size-${SMOKE_SIZE}.parquet
+  fi
   mkdir -p "$SMOKE_DIR"
 
   if [[ ! -f "$SMOKE_FILE" ]]; then
@@ -303,7 +315,7 @@ if [[ "$RUN_MODE" == "smoke" ]]; then
     # interpreter shutdown. Do not discard a successfully written smoke file in
     # that case, but still fail if no usable output was produced.
     set +e
-    SMOKE_SIZE="$SMOKE_SIZE" SMOKE_FILE="$SMOKE_FILE" "$VENV_PYTHON" - <<'PY'
+    SMOKE_SIZE="$SMOKE_SIZE" SMOKE_OFFSET="$SMOKE_OFFSET" SMOKE_FILE="$SMOKE_FILE" "$VENV_PYTHON" - <<'PY'
 import glob
 import os
 
@@ -312,10 +324,11 @@ import pyarrow.parquet as pq
 
 source_files = sorted(glob.glob("Tevatron/browsecomp-plus/data/*.parquet"))
 size = int(os.environ["SMOKE_SIZE"])
+offset = int(os.environ["SMOKE_OFFSET"])
 output_file = os.environ["SMOKE_FILE"]
-table = ds.dataset(source_files, format="parquet").head(size)
+table = ds.dataset(source_files, format="parquet").head(offset + size).slice(offset, size)
 pq.write_table(table, output_file)
-print(f"Created smoke dataset: {output_file} ({table.num_rows} rows)")
+print(f"Created smoke dataset: {output_file} ({table.num_rows} rows, offset={offset})")
 PY
     SMOKE_CREATE_STATUS=$?
     set -e
