@@ -354,6 +354,39 @@ class UnifiedControllerTests(unittest.TestCase):
                         "evidence_sufficient": False,
                         "confidence": 0.7,
                         "expected_information_gain": "MEDIUM",
+                        "tried_strategies": [
+                            {
+                                "strategy": "broad country guessing",
+                                "outcome": "no matching candidate",
+                                "evidence_gain": "NONE",
+                            }
+                        ],
+                        "rejected_hypotheses": ["Finland"],
+                        "promising_leads": [
+                            {
+                                "entity": "Vitali Hakko",
+                                "source": "result 3",
+                                "reason": "matches the hat and scarf clues",
+                                "score": "0.87",
+                            }
+                        ],
+                        "prioritized_open_aspects": [
+                            {
+                                "aspect": "exact youth brand",
+                                "priority": "ANSWER_CRITICAL",
+                                "status": "open",
+                                "best_next_action": "open result 3",
+                            }
+                        ],
+                        "next_best_action": {
+                            "objective": "verify Vitali Hakko",
+                            "recommended_tool": "open",
+                            "query_or_target": "result 3",
+                            "rationale": "the result matches multiple clues",
+                            "expected_gain": "HIGH",
+                            "stop_condition": "confirm the child-created youth brand",
+                        },
+                        "avoid": ["more Finland tower queries"],
                     }
                     if self.calls == 1
                     else {}
@@ -403,6 +436,14 @@ class UnifiedControllerTests(unittest.TestCase):
             ["Vakko was founded by Vitali Hakko 【1†L3-L7】"],
         )
         self.assertEqual(second.loop_progress["open_aspects"], ["youth brand name"])
+        self.assertEqual(
+            second.loop_progress["promising_leads"][0]["entity"],
+            "Vitali Hakko",
+        )
+        self.assertEqual(
+            second.loop_progress["next_best_action"]["query_or_target"],
+            "result 3",
+        )
         self.assertEqual(client.inputs[1]["loop_runtime"]["rounds_in_current_loop"], 40)
 
 

@@ -170,6 +170,45 @@ class OnlineMemoryTests(unittest.TestCase):
                     next_loop_subgoal="diagnose database latency",
                     loop_outcome="RESOLVED",
                     boundary_basis="SUBGOAL_COMPLETED",
+                    loop_progress={
+                        "completion_test": "rule out network latency",
+                        "progress_summary": "network is not the bottleneck",
+                        "resolved_aspects": ["network latency"],
+                        "open_aspects": [],
+                        "key_evidence": [],
+                        "candidate_answer": "",
+                        "answer_stable": False,
+                        "evidence_sufficient": False,
+                        "confidence": 0.8,
+                        "expected_information_gain": "HIGH",
+                        "tried_strategies": [{
+                            "strategy": "network measurements",
+                            "outcome": "normal",
+                            "evidence_gain": "HIGH",
+                        }],
+                        "rejected_hypotheses": ["network bottleneck"],
+                        "promising_leads": [{
+                            "entity": "database latency",
+                            "source": "dependency trace",
+                            "reason": "the remaining slow component",
+                            "score": "0.9",
+                        }],
+                        "prioritized_open_aspects": [{
+                            "aspect": "database latency",
+                            "priority": "ANSWER_CRITICAL",
+                            "status": "open",
+                            "best_next_action": "inspect database trace",
+                        }],
+                        "next_best_action": {
+                            "objective": "diagnose database latency",
+                            "recommended_tool": "open",
+                            "query_or_target": "database dependency trace",
+                            "rationale": "network has been ruled out",
+                            "expected_gain": "HIGH",
+                            "stop_condition": "identify or rule out the database bottleneck",
+                        },
+                        "avoid": ["repeat network measurements"],
+                    },
                     state_delta={
                         "mode": "APPLY",
                         "summary": "network is not the bottleneck",
@@ -212,6 +251,10 @@ class OnlineMemoryTests(unittest.TestCase):
         self.assertEqual(len(compact), 2)
         self.assertEqual(session.traces[-1].current_loop_subgoal, "diagnose database latency")
         self.assertEqual(session.traces[-1].research_phase, "CANDIDATE_VERIFICATION")
+        instruction = session._research_instruction()
+        self.assertIn("Next action: open database dependency trace", instruction)
+        self.assertIn("database latency", instruction)
+        self.assertIn("Do not repeat: repeat network measurements", instruction)
 
     def test_invalid_controller_delta_archives_with_noop_instead_of_polluting_state(self):
         class SwitchingController:

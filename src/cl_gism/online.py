@@ -310,7 +310,21 @@ class OnlineMemorySession:
                         decision.split = False
                     else:
                         self._current_loop_subgoal = control.next_loop_subgoal
-                        self._loop_progress = empty_loop_progress()
+                        # Start a clean evidence ledger while preserving the
+                        # outgoing controller's action-policy handoff. Without
+                        # this, a loop switch discards the very next action it
+                        # selected for the research model.
+                        handoff = empty_loop_progress()
+                        for name in (
+                            "tried_strategies",
+                            "rejected_hypotheses",
+                            "promising_leads",
+                            "prioritized_open_aspects",
+                            "next_best_action",
+                            "avoid",
+                        ):
+                            handoff[name] = control.loop_progress.get(name, handoff[name])
+                        self._loop_progress = handoff
                         self._loop_rounds = 0
                         self._stagnant_rounds = 0
                 elif control.current_loop_subgoal:
@@ -369,8 +383,65 @@ class OnlineMemorySession:
             "candidate_answer": progress.get("candidate_answer") or "",
             "answer_stable": bool(progress.get("answer_stable")),
             "evidence_sufficient": bool(progress.get("evidence_sufficient")),
+            # Discovering a lead or disproving a hypothesis is material
+            # progress even before it becomes citation-bearing evidence.
+            "promising_leads": progress.get("promising_leads") or [],
+            "rejected_hypotheses": progress.get("rejected_hypotheses") or [],
         }
         return json.dumps(durable, ensure_ascii=False, sort_keys=True)
+
+    def _research_instruction(self) -> str:
+        """Turn controller Working State into a concrete research-model contract."""
+
+        if self._task_status == "READY_TO_ANSWER":
+            return (
+                "All success criteria have sufficient citable evidence. Do not call any more tools. "
+                "Produce the final answer now as Explanation, Exact Answer, and Confidence, using "
+                "citations already present in the current loop or evidence memories."
+            )
+        progress = self._loop_progress
+        action = progress.get("next_best_action") or {}
+        lines = [
+            "Use the Working State as an action contract for the next research step.",
+        ]
+        if action.get("objective"):
+            lines.append(f"Objective: {action['objective']}")
+        tool = str(action.get("recommended_tool") or "").strip()
+        target = str(action.get("query_or_target") or "").strip()
+        if tool or target:
+            lines.append(f"Next action: {tool or 'research'} {target}".strip())
+        if action.get("rationale"):
+            lines.append(f"Why: {action['rationale']}")
+        if action.get("stop_condition"):
+            lines.append(f"Stop this action when: {action['stop_condition']}")
+        leads = progress.get("promising_leads") or []
+        if leads:
+            lead_names = [
+                str(item.get("entity") or item.get("source") or "").strip()
+                for item in leads[:3]
+                if isinstance(item, dict)
+            ]
+            lead_names = [item for item in lead_names if item]
+            if lead_names:
+                lines.append("Promising leads to exploit: " + "; ".join(lead_names))
+        avoid = [str(item).strip() for item in progress.get("avoid") or [] if str(item).strip()]
+        rejected = [
+            str(item).strip()
+            for item in progress.get("rejected_hypotheses") or []
+            if str(item).strip()
+        ]
+        exclusions = [*avoid, *[f"rejected hypothesis: {item}" for item in rejected]]
+        if exclusions:
+            lines.append("Do not repeat: " + "; ".join(exclusions[:8]))
+        if self._stagnant_rounds >= 2:
+            lines.append(
+                f"Anti-stagnation rule: there have been {self._stagnant_rounds} rounds without "
+                "material ledger change. Do not issue a semantically equivalent reformulation of a "
+                "failed query; exploit a promising result or change strategy."
+            )
+        if len(lines) == 1:
+            lines.append("Continue the current semantic subgoal with the highest-information action.")
+        return "\n".join(lines)
 
     def _memory_block(self, query: str, hits: list[MemoryHit]) -> str:
         memories = [
@@ -399,13 +470,7 @@ class OnlineMemorySession:
                     "rounds_in_current_loop": self._loop_rounds,
                     "rounds_without_material_progress": self._stagnant_rounds,
                 },
-                "instruction": (
-                    "All success criteria have sufficient citable evidence. Do not call any more tools. "
-                    "Produce the final answer now as Explanation, Exact Answer, and Confidence, using "
-                    "citations already present in the current loop or evidence memories."
-                    if self._task_status == "READY_TO_ANSWER"
-                    else "Continue the current semantic research subgoal."
-                ),
+                "instruction": self._research_instruction(),
             },
             "retrieval_query": query,
             "retrieved_cross_loop_memories": memories,
