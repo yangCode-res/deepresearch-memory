@@ -8,7 +8,7 @@ from typing import Any
 
 from .llm_loop import LLMLoopBoundaryJudge, LoopBoundaryDecision
 from .llm_state_update import LLMStateUpdater
-from .retrieval import LexicalMemoryIndex, MemoryHit, build_retrieval_query
+from .retrieval import LexicalMemoryIndex, MemoryHit, build_retrieval_query, tokenize
 from .schema import LoopMemory, MemoryStatus, RawMemory, SourceType, TaskAnchor, utc_now
 from .trajectory import TrajectoryEvent
 from .unified_controller import UnifiedMemoryController, empty_loop_progress
@@ -52,6 +52,53 @@ def _compact_state_items(items: list[Any], limit: int = 6) -> list[dict[str, Any
             }
         )
     return compacted
+
+
+def _relevant_excerpt(text: str, query: str, limit: int) -> str:
+    """Keep the passage that caused lexical retrieval, not only the prefix.
+
+    Search-result memories are often several thousand characters long. The
+    useful result can occur near the end, so prefix truncation can turn a
+    successful BM25 recall into an empty signal for the research model.
+    """
+
+    if len(text) <= limit:
+        return text
+    query_terms = {
+        term for term in tokenize(query)
+        if len(term) >= 3 and term not in {"the", "and", "for", "with", "from", "that", "this"}
+    }
+    if not query_terms:
+        return text[:limit]
+
+    window_size = max(400, limit - 360)
+    stride = max(200, window_size // 3)
+    best_start = 0
+    best_score = -1.0
+    lowered = text.casefold()
+    document_tokens = tokenize(text)
+    document_frequency = {term: document_tokens.count(term) for term in query_terms}
+    final_start = max(0, len(text) - window_size)
+    starts = list(range(0, final_start + 1, stride))
+    if not starts or starts[-1] != final_start:
+        starts.append(final_start)
+    for start in starts:
+        window = lowered[start : start + window_size]
+        score = 0.0
+        for term in query_terms:
+            count = window.count(term)
+            if count:
+                # Rare terms such as names dominate generic clue words.
+                score += count / max(1, document_frequency.get(term, 1))
+        if score > best_score:
+            best_score = score
+            best_start = start
+    best_start = max(0, min(best_start, len(text) - window_size))
+    passage = text[best_start : best_start + window_size]
+    if best_start == 0:
+        return passage[:limit]
+    header = text[:120].rstrip()
+    return (header + "\n...[retrieval-matched passage]...\n" + passage)[:limit]
 
 
 @dataclass
@@ -493,7 +540,7 @@ class OnlineMemorySession:
                 "type": hit.memory_type,
                 "source_type": hit.metadata.get("source_type"),
                 "score": round(hit.score, 4),
-                "text": hit.text[: self.memory_text_limit],
+                "text": _relevant_excerpt(hit.text, query, self.memory_text_limit),
             }
             for hit in hits
         ]

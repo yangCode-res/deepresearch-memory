@@ -6,6 +6,7 @@ from cl_gism import (
     OnlineMemorySession,
     UnifiedControlDecision,
 )
+from cl_gism.online import _relevant_excerpt
 
 
 class FakeController:
@@ -44,6 +45,16 @@ class FakeController:
 
 
 class OnlineMemoryTests(unittest.TestCase):
+    def test_retrieved_memory_keeps_query_matched_passage_beyond_prefix_limit(self):
+        text = "SEARCH RESULTS\n" + ("generic unrelated result\n" * 120)
+        text += "Vitali Hakko founded Vakko after operating a hat shop."
+
+        excerpt = _relevant_excerpt(text, "Vitali Hakko Vakko hat shop", 600)
+
+        self.assertLessEqual(len(excerpt), 600)
+        self.assertIn("Vitali Hakko", excerpt)
+        self.assertIn("retrieval-matched passage", excerpt)
+
     def test_material_progress_ignores_narrative_lead_churn(self):
         first = {
             "open_aspects": ["identify the youth brand"],
