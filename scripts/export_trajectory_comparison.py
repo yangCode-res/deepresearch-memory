@@ -34,6 +34,13 @@ def exact_answer(record: dict[str, Any]) -> str:
     return match.group(1).strip(" *") if match else final[-300:]
 
 
+def normalize_answer(value: Any) -> str:
+    """Normalize presentation-only differences before comparing short answers."""
+    normalized = str(value or "").replace("\u202f", " ").replace("\u00a0", " ")
+    normalized = re.sub(r"[*_`]", "", normalized)
+    return re.sub(r"\s+", " ", normalized).strip().casefold()
+
+
 def assistant_rounds(messages: list[dict[str, Any]]) -> list[tuple[int, dict[str, Any], list[dict[str, Any]]]]:
     rounds: list[tuple[int, dict[str, Any], list[dict[str, Any]]]] = []
     current: tuple[int, dict[str, Any], list[dict[str, Any]]] | None = None
@@ -102,6 +109,32 @@ def render_trajectory(
                 f"- Completed loops: `{len(trace.get('completed_loops', []))}`",
                 f"- State version: `{trace.get('state', {}).get('state_version')}`",
                 f"- StateDelta count: `{len(trace.get('state_deltas', []))}`",
+                "",
+            ]
+        )
+    initial_messages = []
+    for message in messages:
+        if message.get("role") == "assistant":
+            break
+        initial_messages.append(message)
+    lines.extend(["## Initial messages / 初始输入消息", ""])
+    if initial_messages:
+        for index, message in enumerate(initial_messages, start=1):
+            lines.extend(
+                [
+                    f"### Initial message {index}: {message.get('role', 'unknown')}",
+                    "",
+                    "```json",
+                    render_message(message),
+                    "```",
+                    "",
+                ]
+            )
+    else:
+        lines.extend(
+            [
+                "The result record does not retain separate system/user message objects; "
+                "the original user question is preserved above.",
                 "",
             ]
         )
@@ -201,7 +234,7 @@ def render_comparison(base: dict[str, Any], memory: dict[str, Any], trace: dict[
             "",
             "| Metric | Baseline | CL-GISM V2 |",
             "|---|---:|---:|",
-            f"| Correct answer | {exact_answer(base) == str(base.get('answer'))} | {exact_answer(memory) == str(memory.get('answer'))} |",
+            f"| Correct answer | {normalize_answer(exact_answer(base)) == normalize_answer(base.get('answer'))} | {normalize_answer(exact_answer(memory)) == normalize_answer(memory.get('answer'))} |",
             f"| Predicted answer | {exact_answer(base)} | {exact_answer(memory)} |",
             f"| Research rounds | {len(base_index)} | {len(memory_index)} |",
             f"| Latency seconds | {base.get('latency_s'):.2f} | {memory.get('latency_s'):.2f} |",
