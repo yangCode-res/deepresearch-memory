@@ -13,6 +13,12 @@ from .trajectory import TrajectoryEvent
 
 
 TASK_STATUSES = {"CONTINUE", "SWITCH_LOOP", "READY_TO_ANSWER"}
+RESEARCH_PHASES = {
+    "DISCOVERY",
+    "CANDIDATE_VERIFICATION",
+    "EVIDENCE_COMPLETION",
+    "ANSWER_SYNTHESIS",
+}
 VALID_ITEM_STATUSES = {"active", "tentative", "confirmed", "rejected", "superseded", "resolved"}
 VALID_SOURCE_TYPES = {"user", "agent", "tool", "paper", "web", "experiment", "system"}
 
@@ -20,6 +26,7 @@ VALID_SOURCE_TYPES = {"user", "agent", "tool", "paper", "web", "experiment", "sy
 @dataclass
 class UnifiedControlDecision:
     task_status: str = "CONTINUE"
+    research_phase: str = "DISCOVERY"
     switch_loop: bool = False
     reason: str = ""
     confidence: float = 0.0
@@ -83,7 +90,11 @@ class UnifiedMemoryController:
         current_loop: list[TrajectoryEvent],
         latest_events: list[TrajectoryEvent],
         candidates: list[MemoryHit],
+        current_phase: str = "DISCOVERY",
     ) -> UnifiedControlDecision:
+        current_phase = str(current_phase or "DISCOVERY").upper()
+        if current_phase not in RESEARCH_PHASES:
+            raise ValueError(f"invalid current_phase {current_phase}")
         allowed_ids = {hit.memory_id for hit in candidates}
         system_prompt = (
             "You are the control plane for a deep-research memory system. Return only valid JSON. "
@@ -93,6 +104,11 @@ class UnifiedMemoryController:
             "next research-model call. A loop is a stable semantic subgoal, not one search query. Query "
             "rephrasing, opening a result, collecting citations, and verifying multiple criteria for the "
             "same candidate normally remain in the same loop. Do not switch merely because a search stalled. "
+            "Classify the next call into exactly one research phase: DISCOVERY means no concrete candidate "
+            "has been identified; CANDIDATE_VERIFICATION means a concrete candidate is being tested against "
+            "the requirements; EVIDENCE_COMPLETION means the answer candidate is stable and only missing "
+            "source or citation coverage is being filled; ANSWER_SYNTHESIS means research is complete and the "
+            "next call must answer. A phase change is a semantic loop boundary. "
             "Never solve the user's research question yourself and never invent memory IDs or evidence IDs. "
             "Operation contract: ADD may target active_subgoals, confirmed_constraints, soft_preferences, "
             "candidate_options, rejected_options, working_hypotheses, resolved_findings, open_questions, "
@@ -107,6 +123,7 @@ class UnifiedMemoryController:
                 "immutable_constraints": anchor.immutable_constraints,
             },
             "global_state": _state(state),
+            "current_research_phase": current_phase,
             "current_loop": [_event(event) for event in current_loop[-30:]],
             "latest_events": [_event(event) for event in latest_events],
             "memory_candidates": [
@@ -120,6 +137,7 @@ class UnifiedMemoryController:
             ],
             "required_output": {
                 "task_status": "CONTINUE|SWITCH_LOOP|READY_TO_ANSWER",
+                "research_phase": "DISCOVERY|CANDIDATE_VERIFICATION|EVIDENCE_COMPLETION|ANSWER_SYNTHESIS",
                 "loop": {
                     "switch": False,
                     "reason": "short reason",
@@ -160,16 +178,22 @@ class UnifiedMemoryController:
                 "Return READY_TO_ANSWER only when the exact answer is identified and every required claim has sufficient citable evidence in current_loop, latest_events, state, or selected memories.",
                 "Return SWITCH_LOOP only for a genuinely different subgoal, candidate, or research phase; ordinary assistant/tool continuations remain CONTINUE.",
                 "READY_TO_ANSWER and CONTINUE require loop.switch=false; SWITCH_LOOP requires loop.switch=true.",
+                "Return CONTINUE only when research_phase equals current_research_phase.",
+                "Return SWITCH_LOOP when research_phase changes between DISCOVERY, CANDIDATE_VERIFICATION, and EVIDENCE_COMPLETION.",
+                "When a candidate changes from unknown to a concrete named candidate, switch from DISCOVERY to CANDIDATE_VERIFICATION.",
+                "When the candidate is stable and the remaining work is only missing sources or citations, switch from CANDIDATE_VERIFICATION to EVIDENCE_COMPLETION.",
+                "If a candidate is rejected and broad search resumes, switch back to DISCOVERY.",
+                "READY_TO_ANSWER requires research_phase=ANSWER_SYNTHESIS and sufficient citable evidence.",
                 "Only emit StateDelta operations when loop.switch=true.",
                 "When switch=false, state_delta.mode must be NOOP and operations must be empty.",
-                "When switch=true, use APPLY with valid operations, or NOOP if nothing durable was learned.",
+                "When switch=true, use APPLY with at least one concise operation that records the durable phase result.",
                 "StateDelta values must be concise durable facts, never reasoning transcripts, search narration, or tool-call JSON.",
                 "Preserve citation markers or source coordinates inside finding values when they are available.",
                 "UPDATE+current_goal and RESOLVE+open_questions are the only valid non-ADD combinations.",
                 "Use at most four StateDelta operations.",
                 f"Select at most {self.max_selected_memories} candidate memory IDs.",
                 "Prefer tool-source memories containing evidence and citations over assistant search narration.",
-                "Return a single JSON object with exactly task_status, loop, state_delta, and retrieval.",
+                "Return a single JSON object with exactly task_status, research_phase, loop, state_delta, and retrieval.",
             ],
         }
         user_prompt = json.dumps(payload, ensure_ascii=False)
@@ -188,7 +212,7 @@ class UnifiedMemoryController:
                 current_prompt = user_prompt
             raw = self.client.complete_json(system_prompt, current_prompt)
             try:
-                self._validate_contract(raw, state, allowed_ids)
+                self._validate_contract(raw, state, allowed_ids, current_phase)
                 break
             except ValueError as exc:
                 last_error = str(exc)
@@ -209,6 +233,7 @@ class UnifiedMemoryController:
             confidence = 0.0
         return UnifiedControlDecision(
             task_status=str(raw.get("task_status") or "CONTINUE").upper(),
+            research_phase=str(raw.get("research_phase") or current_phase).upper(),
             switch_loop=bool(loop.get("switch", False)),
             reason=str(loop.get("reason") or ""),
             confidence=confidence,
@@ -222,14 +247,24 @@ class UnifiedMemoryController:
         )
 
     @staticmethod
-    def _validate_contract(raw: dict[str, Any], state: GlobalIntentState, allowed_ids: set[str]) -> None:
+    def _validate_contract(
+        raw: dict[str, Any],
+        state: GlobalIntentState,
+        allowed_ids: set[str],
+        current_phase: str,
+    ) -> None:
         if not isinstance(raw, dict):
             raise ValueError("response must be an object")
-        if set(raw) != {"task_status", "loop", "state_delta", "retrieval"}:
-            raise ValueError("response must contain exactly task_status, loop, state_delta, and retrieval")
+        if set(raw) != {"task_status", "research_phase", "loop", "state_delta", "retrieval"}:
+            raise ValueError(
+                "response must contain exactly task_status, research_phase, loop, state_delta, and retrieval"
+            )
         task_status = str(raw.get("task_status") or "").upper()
         if task_status not in TASK_STATUSES:
             raise ValueError("task_status must be CONTINUE, SWITCH_LOOP, or READY_TO_ANSWER")
+        research_phase = str(raw.get("research_phase") or "").upper()
+        if research_phase not in RESEARCH_PHASES:
+            raise ValueError("invalid research_phase")
         loop = raw.get("loop")
         delta = raw.get("state_delta")
         retrieval = raw.get("retrieval")
@@ -239,6 +274,16 @@ class UnifiedMemoryController:
             raise ValueError("loop.switch must be boolean")
         if (task_status == "SWITCH_LOOP") != loop["switch"]:
             raise ValueError("SWITCH_LOOP requires loop.switch=true and other statuses require false")
+        if task_status == "CONTINUE" and research_phase != current_phase:
+            raise ValueError("CONTINUE must keep the current research phase")
+        if task_status == "SWITCH_LOOP" and research_phase == current_phase:
+            raise ValueError("SWITCH_LOOP must change the research phase")
+        if task_status == "SWITCH_LOOP" and research_phase == "ANSWER_SYNTHESIS":
+            raise ValueError("use READY_TO_ANSWER for ANSWER_SYNTHESIS")
+        if task_status == "READY_TO_ANSWER" and research_phase != "ANSWER_SYNTHESIS":
+            raise ValueError("READY_TO_ANSWER requires ANSWER_SYNTHESIS")
+        if research_phase == "ANSWER_SYNTHESIS" and task_status != "READY_TO_ANSWER":
+            raise ValueError("ANSWER_SYNTHESIS requires READY_TO_ANSWER")
         operations = delta.get("operations")
         if not isinstance(operations, list):
             raise ValueError("state_delta.operations must be a list")
@@ -249,6 +294,8 @@ class UnifiedMemoryController:
             raise ValueError("state_delta.mode must be APPLY or NOOP")
         if mode == "NOOP" and operations:
             raise ValueError("NOOP cannot contain operations")
+        if task_status == "SWITCH_LOOP" and (mode != "APPLY" or not operations):
+            raise ValueError("SWITCH_LOOP requires APPLY with at least one durable operation")
         add_targets = {
             "active_subgoals", "confirmed_constraints", "soft_preferences", "candidate_options",
             "rejected_options", "working_hypotheses", "resolved_findings", "open_questions",

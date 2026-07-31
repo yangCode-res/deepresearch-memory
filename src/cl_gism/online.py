@@ -66,6 +66,7 @@ class OnlineMemoryTrace:
     loop_switched: bool = False
     loop_reason: str = ""
     task_status: str = "CONTINUE"
+    research_phase: str = "DISCOVERY"
     controller_error: str | None = None
     controller_validation_retries: int = 0
     controller_response: dict[str, Any] | None = None
@@ -117,6 +118,8 @@ class OnlineMemorySession:
         self._controller_succeeded = False
         self._last_control = None
         self._task_status = "CONTINUE"
+        self._research_phase = "DISCOVERY"
+        self._just_archived_memory_ids: list[str] = []
 
     def _event(self, message: dict[str, Any]) -> TrajectoryEvent:
         self._sequence += 1
@@ -218,6 +221,7 @@ class OnlineMemorySession:
             self.index.add_raw(event.raw_memory)
         self.index.add_loop(loop)
         self.completed_loops.append(loop)
+        self._just_archived_memory_ids = [loop.loop_id]
         self.current_events = []
         return True
 
@@ -228,6 +232,7 @@ class OnlineMemorySession:
         self._controller_succeeded = False
         self._last_control = None
         self._task_status = "CONTINUE"
+        self._just_archived_memory_ids = []
         self._controller_query = ""
         self._controller_selected_ids = []
         self._controller_selected_hits = []
@@ -243,6 +248,7 @@ class OnlineMemorySession:
                     current_loop=self.current_events,
                     latest_events=latest_events,
                     candidates=candidates,
+                    current_phase=self._research_phase,
                 )
                 self._last_control = control
                 self._task_status = control.task_status
@@ -267,6 +273,7 @@ class OnlineMemorySession:
                     archived = self._archive_current_loop(decision, control.state_delta)
                     if not archived:
                         decision.split = False
+                self._research_phase = control.research_phase
             except Exception as exc:
                 self._pending_switch = LoopBoundaryDecision(False, "controller fallback", 0.0)
                 detail = str(exc).replace("\n", " ")[:500]
@@ -329,6 +336,7 @@ class OnlineMemorySession:
             "global_intent_state": self._state_payload(),
             "research_control": {
                 "task_status": self._task_status,
+                "research_phase": self._research_phase,
                 "instruction": (
                     "All success criteria have sufficient citable evidence. Do not call any more tools. "
                     "Produce the final answer now as Explanation, Exact Answer, and Confidence, using "
@@ -360,7 +368,17 @@ class OnlineMemorySession:
         query = self._controller_query or build_retrieval_query(self.anchor, self.state, recent_event)
         candidates = self.index.search(query, top_k=max(self.top_k, 12), task_id=self.task_id)
         if self._controller_succeeded:
-            hits = self._controller_selected_hits
+            handoff_hits = self.index.lookup(self._just_archived_memory_ids)
+            combined = [*handoff_hits, *self._controller_selected_hits]
+            seen_ids: set[str] = set()
+            hits = []
+            for hit in combined:
+                if hit.memory_id in seen_ids:
+                    continue
+                seen_ids.add(hit.memory_id)
+                hits.append(hit)
+                if len(hits) >= self.top_k:
+                    break
         else:
             hits = candidates[: self.top_k]
         system = dict(canonical_messages[0])
@@ -381,6 +399,7 @@ class OnlineMemorySession:
                 loop_switched=self._pending_switch.split,
                 loop_reason=self._pending_switch.reason,
                 task_status=self._task_status,
+                research_phase=self._research_phase,
                 controller_error=getattr(self._pending_switch, "controller_error", None),
                 controller_validation_retries=getattr(
                     getattr(self, "_last_control", None), "validation_retries", 0

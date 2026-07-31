@@ -79,6 +79,24 @@ class LexicalMemoryIndex:
         self.documents.append(document)
         self._tokens[document.memory_id] = tokenize(document.text)
 
+    def lookup(self, memory_ids: list[str]) -> list[MemoryHit]:
+        """Fetch specific memories in caller order for boundary handoff."""
+        by_id = {document.memory_id: document for document in self.documents}
+        hits: list[MemoryHit] = []
+        for memory_id in memory_ids:
+            document = by_id.get(memory_id)
+            if document is not None:
+                hits.append(
+                    MemoryHit(
+                        document.memory_id,
+                        document.memory_type,
+                        1.0,
+                        document.text,
+                        document.metadata,
+                    )
+                )
+        return hits
+
     def search(self, query: str, top_k: int = 5, task_id: str | None = None) -> list[MemoryHit]:
         query_tokens = tokenize(query)
         if not query_tokens:

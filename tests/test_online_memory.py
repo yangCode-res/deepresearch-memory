@@ -90,6 +90,7 @@ class OnlineMemoryTests(unittest.TestCase):
             def decide(self, **kwargs):
                 return UnifiedControlDecision(
                     task_status="READY_TO_ANSWER",
+                    research_phase="ANSWER_SYNTHESIS",
                     switch_loop=False,
                     reason="answer and citations are complete",
                     confidence=0.99,
@@ -131,11 +132,13 @@ class OnlineMemoryTests(unittest.TestCase):
                 if self.calls == 1:
                     return UnifiedControlDecision(
                         task_status="CONTINUE",
+                        research_phase="DISCOVERY",
                         switch_loop=False,
                         state_delta={"mode": "NOOP", "summary": "", "operations": []},
                     )
                 return UnifiedControlDecision(
                     task_status="SWITCH_LOOP",
+                    research_phase="CANDIDATE_VERIFICATION",
                     switch_loop=True,
                     reason="genuinely new candidate",
                     confidence=0.9,
@@ -179,6 +182,8 @@ class OnlineMemoryTests(unittest.TestCase):
         self.assertEqual(session.state.state_version, 1)
         self.assertEqual(session.state.working_hypotheses, [])
         self.assertIn("not-a-status", session.traces[-1].controller_error)
+        self.assertEqual(session.traces[-1].research_phase, "CANDIDATE_VERIFICATION")
+        self.assertEqual(session.traces[-1].retrieved_memory_ids[0], session.completed_loops[0].loop_id)
 
 
 if __name__ == "__main__":

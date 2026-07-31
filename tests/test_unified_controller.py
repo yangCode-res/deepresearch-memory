@@ -12,6 +12,7 @@ class FakeClient:
     def complete_json(self, system_prompt, user_prompt):
         return {
             "task_status": "SWITCH_LOOP",
+            "research_phase": "CANDIDATE_VERIFICATION",
             "loop": {
                 "switch": True,
                 "reason": "new verification phase",
@@ -20,9 +21,16 @@ class FakeClient:
                 "next_loop_subgoal": "verify candidate",
             },
             "state_delta": {
-                "mode": "NOOP",
+                "mode": "APPLY",
                 "summary": "retain candidate",
-                "operations": [],
+                "operations": [{
+                    "operation": "ADD",
+                    "target": "working_hypotheses",
+                    "value": "Alpha is the candidate",
+                    "reason": "discovery identified a named candidate",
+                    "evidence_ids": [],
+                    "target_item_ids": [],
+                }],
             },
             "retrieval": {
                 "query": "verify Alpha",
@@ -46,6 +54,7 @@ class UnifiedControllerTests(unittest.TestCase):
         )
         self.assertTrue(decision.switch_loop)
         self.assertEqual(decision.task_status, "SWITCH_LOOP")
+        self.assertEqual(decision.research_phase, "CANDIDATE_VERIFICATION")
         self.assertEqual(decision.retrieval_query, "verify Alpha")
         self.assertEqual(decision.selected_memory_ids, ["loop_allowed"])
 
@@ -54,6 +63,7 @@ class UnifiedControllerTests(unittest.TestCase):
             def complete_json(self, system_prompt, user_prompt):
                 return {
                     "task_status": "READY_TO_ANSWER",
+                    "research_phase": "ANSWER_SYNTHESIS",
                     "loop": {
                         "switch": False,
                         "reason": "answer and citations are complete",
@@ -90,6 +100,7 @@ class UnifiedControllerTests(unittest.TestCase):
                 self.calls += 1
                 return {
                     "task_status": "SWITCH_LOOP",
+                    "research_phase": "CANDIDATE_VERIFICATION",
                     "loop": {
                         "switch": True,
                         "reason": "new phase",
@@ -124,6 +135,35 @@ class UnifiedControllerTests(unittest.TestCase):
                 candidates=[],
             )
         self.assertEqual(client.calls, 2)
+
+    def test_phase_change_requires_loop_switch(self):
+        class InconsistentClient:
+            def complete_json(self, system_prompt, user_prompt):
+                return {
+                    "task_status": "CONTINUE",
+                    "research_phase": "CANDIDATE_VERIFICATION",
+                    "loop": {
+                        "switch": False,
+                        "reason": "candidate was identified but continue was incorrectly selected",
+                        "confidence": 0.9,
+                        "current_loop_subgoal": "discover candidate",
+                        "next_loop_subgoal": "verify candidate",
+                    },
+                    "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
+                    "retrieval": {"query": "Alpha", "selected_memory_ids": [], "reason": ""},
+                }
+
+        anchor = TaskAnchor(task_id="task_phase", original_goal="Find Alpha")
+        state = HeuristicStateUpdater().initialize(anchor)
+        with self.assertRaisesRegex(ValueError, "CONTINUE must keep"):
+            UnifiedMemoryController(InconsistentClient()).decide(
+                anchor=anchor,
+                state=state,
+                current_loop=[],
+                latest_events=[],
+                candidates=[],
+                current_phase="DISCOVERY",
+            )
 
 
 if __name__ == "__main__":
