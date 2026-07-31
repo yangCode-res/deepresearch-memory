@@ -67,7 +67,7 @@ class ForcedFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         )
         calls = 0
 
-        async def fake_generate(generator_arg, tokens, stop_strings):
+        async def fake_generate(generator_arg, tokens):
             nonlocal calls
             calls += 1
             return (
@@ -76,7 +76,7 @@ class ForcedFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
                 "Exact Answer: Alpha\nConfidence: 99%"
             )
 
-        module.openresearcher._generate_with_retry = fake_generate
+        module._generate_bounded_final = fake_generate
         messages = await module._force_final_answer(signal, generator)
 
         self.assertEqual(calls, 1)
