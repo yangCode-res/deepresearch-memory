@@ -217,8 +217,9 @@ def render_comparison(base: dict[str, Any], memory: dict[str, Any], trace: dict[
     for item in memory_index:
         meta = trace_rounds[item["round"] - 1] if item["round"] <= len(trace_rounds) else {}
         rows.append(
-            "| {round} | {switch} | {state} | {retrieved} | {tool} | {preview} |".format(
+            "| {round} | {status} | {switch} | {state} | {retrieved} | {tool} | {preview} |".format(
                 round=item["round"],
+                status=meta.get("task_status", ""),
                 switch="Y" if meta.get("loop_switched") else "",
                 state=meta.get("state_version", ""),
                 retrieved=len(meta.get("retrieved_memory_ids", [])),
@@ -249,8 +250,8 @@ def render_comparison(base: dict[str, Any], memory: dict[str, Any], trace: dict[
             "",
             "## CL-GISM round index / CL-GISM 逐轮索引",
             "",
-            "| Round | Loop switch | State v | Memories | Tool call | Intent preview |",
-            "|---:|:---:|---:|---:|---|---|",
+            "| Round | Task status | Loop switch | State v | Memories | Tool call | Intent preview |",
+            "|---:|---|:---:|---:|---:|---|---|",
             *rows,
             "",
             "## Manual calibration checklist / 人工校准建议",

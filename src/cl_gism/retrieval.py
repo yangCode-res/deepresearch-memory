@@ -55,13 +55,15 @@ class LexicalMemoryIndex:
         )
 
     def add_loop(self, memory: LoopMemory) -> None:
+        # Put durable conclusions and tool observations before assistant actions.
+        # Prompt packing truncates long memories, so evidence must appear first.
         text = "\n".join(
             [
-                memory.subgoal,
-                memory.context or "",
-                memory.conclusion or "",
-                json.dumps(memory.actions, ensure_ascii=False),
-                json.dumps(memory.observations, ensure_ascii=False),
+                f"SUBGOAL: {memory.subgoal}",
+                f"CONCLUSION: {memory.conclusion or ''}",
+                f"TOOL_EVIDENCE: {json.dumps(memory.observations, ensure_ascii=False)}",
+                f"CONTEXT: {memory.context or ''}",
+                f"ACTIONS: {json.dumps(memory.actions, ensure_ascii=False)}",
             ]
         )
         self._add(
@@ -99,6 +101,13 @@ class LexicalMemoryIndex:
                 idf = math.log(1 + (n - df[term] + 0.5) / (df[term] + 0.5))
                 score += idf * ((tf * (k1 + 1)) / (tf + k1 * (1 - b + b * dl / max(avgdl, 1))))
             if score > 0:
+                source_type = document.metadata.get("source_type")
+                if source_type == "tool":
+                    score *= 1.3
+                elif document.memory_type == "loop":
+                    score *= 1.15
+                elif source_type == "agent":
+                    score *= 0.8
                 hits.append(MemoryHit(document.memory_id, document.memory_type, score, document.text, document.metadata))
         hits.sort(key=lambda hit: hit.score, reverse=True)
         return hits[:top_k]

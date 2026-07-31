@@ -12,8 +12,14 @@ from .schema import GlobalIntentState, TaskAnchor
 from .trajectory import TrajectoryEvent
 
 
+TASK_STATUSES = {"CONTINUE", "SWITCH_LOOP", "READY_TO_ANSWER"}
+VALID_ITEM_STATUSES = {"active", "tentative", "confirmed", "rejected", "superseded", "resolved"}
+VALID_SOURCE_TYPES = {"user", "agent", "tool", "paper", "web", "experiment", "system"}
+
+
 @dataclass
 class UnifiedControlDecision:
+    task_status: str = "CONTINUE"
     switch_loop: bool = False
     reason: str = ""
     confidence: float = 0.0
@@ -32,10 +38,27 @@ def _event(event: TrajectoryEvent, limit: int = 1000) -> dict[str, Any]:
 
 def _state(state: GlobalIntentState) -> dict[str, Any]:
     def values(name: str) -> list[Any]:
-        return [item.value for item in getattr(state, name)[-6:]]
+        return [
+            {
+                "id": item.item_id,
+                "value": item.value,
+                "status": item.status.value,
+                "confidence": item.confidence,
+            }
+            for item in getattr(state, name)[-6:]
+        ]
     return {
         "version": state.state_version,
-        "current_goal": state.current_goal.value if state.current_goal else None,
+        "current_goal": (
+            {
+                "id": state.current_goal.item_id,
+                "value": state.current_goal.value,
+                "status": state.current_goal.status.value,
+                "confidence": state.current_goal.confidence,
+            }
+            if state.current_goal
+            else None
+        ),
         "active_subgoals": values("active_subgoals"),
         "working_hypotheses": values("working_hypotheses"),
         "resolved_findings": values("resolved_findings"),
@@ -64,9 +87,12 @@ class UnifiedMemoryController:
         allowed_ids = {hit.memory_id for hit in candidates}
         system_prompt = (
             "You are the control plane for a deep-research memory system. Return only valid JSON. "
-            "In one decision: (1) determine whether latest_events start a new semantic research loop; "
-            "(2) if switching, describe the minimal StateDelta learned from the completed current_loop; "
-            "(3) select prior memories useful for the next research-model call. "
+            "In one decision: (1) determine whether research should continue, switch to a genuinely new "
+            "semantic subgoal, or stop researching and answer; (2) if switching, describe the minimal "
+            "StateDelta learned from the completed current_loop; (3) select prior memories useful for the "
+            "next research-model call. A loop is a stable semantic subgoal, not one search query. Query "
+            "rephrasing, opening a result, collecting citations, and verifying multiple criteria for the "
+            "same candidate normally remain in the same loop. Do not switch merely because a search stalled. "
             "Never solve the user's research question yourself and never invent memory IDs or evidence IDs. "
             "Operation contract: ADD may target active_subgoals, confirmed_constraints, soft_preferences, "
             "candidate_options, rejected_options, working_hypotheses, resolved_findings, open_questions, "
@@ -84,10 +110,16 @@ class UnifiedMemoryController:
             "current_loop": [_event(event) for event in current_loop[-30:]],
             "latest_events": [_event(event) for event in latest_events],
             "memory_candidates": [
-                {"id": hit.memory_id, "type": hit.memory_type, "text": hit.text[:1200]}
+                {
+                    "id": hit.memory_id,
+                    "type": hit.memory_type,
+                    "source_type": hit.metadata.get("source_type"),
+                    "text": hit.text[:1200],
+                }
                 for hit in candidates
             ],
             "required_output": {
+                "task_status": "CONTINUE|SWITCH_LOOP|READY_TO_ANSWER",
                 "loop": {
                     "switch": False,
                     "reason": "short reason",
@@ -125,14 +157,19 @@ class UnifiedMemoryController:
                 },
             },
             "rules": [
-                "Decide a boundary on every call; do not split ordinary assistant/tool continuations.",
+                "Return READY_TO_ANSWER only when the exact answer is identified and every required claim has sufficient citable evidence in current_loop, latest_events, state, or selected memories.",
+                "Return SWITCH_LOOP only for a genuinely different subgoal, candidate, or research phase; ordinary assistant/tool continuations remain CONTINUE.",
+                "READY_TO_ANSWER and CONTINUE require loop.switch=false; SWITCH_LOOP requires loop.switch=true.",
                 "Only emit StateDelta operations when loop.switch=true.",
                 "When switch=false, state_delta.mode must be NOOP and operations must be empty.",
                 "When switch=true, use APPLY with valid operations, or NOOP if nothing durable was learned.",
+                "StateDelta values must be concise durable facts, never reasoning transcripts, search narration, or tool-call JSON.",
+                "Preserve citation markers or source coordinates inside finding values when they are available.",
                 "UPDATE+current_goal and RESOLVE+open_questions are the only valid non-ADD combinations.",
                 "Use at most four StateDelta operations.",
                 f"Select at most {self.max_selected_memories} candidate memory IDs.",
-                "Return a single JSON object with exactly loop, state_delta, and retrieval.",
+                "Prefer tool-source memories containing evidence and citations over assistant search narration.",
+                "Return a single JSON object with exactly task_status, loop, state_delta, and retrieval.",
             ],
         }
         user_prompt = json.dumps(payload, ensure_ascii=False)
@@ -171,6 +208,7 @@ class UnifiedMemoryController:
         except (TypeError, ValueError):
             confidence = 0.0
         return UnifiedControlDecision(
+            task_status=str(raw.get("task_status") or "CONTINUE").upper(),
             switch_loop=bool(loop.get("switch", False)),
             reason=str(loop.get("reason") or ""),
             confidence=confidence,
@@ -187,6 +225,11 @@ class UnifiedMemoryController:
     def _validate_contract(raw: dict[str, Any], state: GlobalIntentState, allowed_ids: set[str]) -> None:
         if not isinstance(raw, dict):
             raise ValueError("response must be an object")
+        if set(raw) != {"task_status", "loop", "state_delta", "retrieval"}:
+            raise ValueError("response must contain exactly task_status, loop, state_delta, and retrieval")
+        task_status = str(raw.get("task_status") or "").upper()
+        if task_status not in TASK_STATUSES:
+            raise ValueError("task_status must be CONTINUE, SWITCH_LOOP, or READY_TO_ANSWER")
         loop = raw.get("loop")
         delta = raw.get("state_delta")
         retrieval = raw.get("retrieval")
@@ -194,6 +237,8 @@ class UnifiedMemoryController:
             raise ValueError("loop, state_delta, and retrieval must be objects")
         if not isinstance(loop.get("switch"), bool):
             raise ValueError("loop.switch must be boolean")
+        if (task_status == "SWITCH_LOOP") != loop["switch"]:
+            raise ValueError("SWITCH_LOOP requires loop.switch=true and other statuses require false")
         operations = delta.get("operations")
         if not isinstance(operations, list):
             raise ValueError("state_delta.operations must be a list")
@@ -227,12 +272,34 @@ class UnifiedMemoryController:
                 raise ValueError("every operation requires a reason")
             if operation in {"ADD", "UPDATE"} and op.get("value") in (None, ""):
                 raise ValueError("ADD/UPDATE requires a value")
+            if operation in {"ADD", "UPDATE"} and len(str(op.get("value"))) > 800:
+                raise ValueError("StateDelta values must be at most 800 characters")
             evidence_ids = op.get("evidence_ids", [])
             if evidence_ids:
                 raise ValueError("controller evidence_ids must be empty")
             target_ids = {str(item) for item in op.get("target_item_ids", [])}
             if operation == "RESOLVE" and target_ids and not target_ids <= valid_open_ids:
                 raise ValueError("RESOLVE contains unknown open_question IDs")
+            item = op.get("item")
+            if operation in {"ADD", "UPDATE"}:
+                if item is not None and not isinstance(item, dict):
+                    raise ValueError("item must be an object")
+                if isinstance(item, dict):
+                    status = str(item.get("status") or "tentative")
+                    source_type = str(item.get("source_type") or "agent")
+                    if status not in VALID_ITEM_STATUSES:
+                        raise ValueError(f"invalid item.status {status}")
+                    if source_type not in VALID_SOURCE_TYPES:
+                        raise ValueError(f"invalid item.source_type {source_type}")
+                    try:
+                        confidence = float(item.get("confidence", 0.5))
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError("item.confidence must be numeric") from exc
+                    if not 0.0 <= confidence <= 1.0:
+                        raise ValueError("item.confidence must be between 0 and 1")
+                    for field_name in ("contradicts", "supersedes"):
+                        if not isinstance(item.get(field_name, []), list):
+                            raise ValueError(f"item.{field_name} must be a list")
         selected = retrieval.get("selected_memory_ids", [])
         if not isinstance(selected, list) or any(str(item) not in allowed_ids for item in selected):
             raise ValueError("retrieval contains unknown memory IDs")

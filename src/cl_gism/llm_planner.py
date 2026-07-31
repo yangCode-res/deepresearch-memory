@@ -8,9 +8,11 @@ context window.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import http.client
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -125,14 +127,20 @@ class OpenAIChatJSONClient:
             },
             method="POST",
         )
-        try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
-                body = response.read().decode("utf-8")
-        except urllib.error.HTTPError as exc:  # pragma: no cover - network path
-            detail = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(f"OpenAI request failed with status {exc.code}: {detail}") from exc
-        except urllib.error.URLError as exc:  # pragma: no cover - network path
-            raise RuntimeError(f"OpenAI request failed: {exc.reason}") from exc
+        body = ""
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+                    body = response.read().decode("utf-8")
+                break
+            except urllib.error.HTTPError as exc:  # pragma: no cover - network path
+                detail = exc.read().decode("utf-8", errors="ignore")
+                raise RuntimeError(f"OpenAI request failed with status {exc.code}: {detail}") from exc
+            except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError, ConnectionError) as exc:
+                if attempt == 2:  # pragma: no cover - network path
+                    detail = getattr(exc, "reason", str(exc))
+                    raise RuntimeError(f"OpenAI request failed after 3 attempts: {detail}") from exc
+                time.sleep(0.5 * (2**attempt))
 
         data = json.loads(body)
         choices = data.get("choices") or []
