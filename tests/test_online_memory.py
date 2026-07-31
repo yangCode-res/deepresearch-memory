@@ -94,6 +94,9 @@ class OnlineMemoryTests(unittest.TestCase):
                     switch_loop=False,
                     reason="answer and citations are complete",
                     confidence=0.99,
+                    current_loop_subgoal="verify Alpha",
+                    loop_outcome="RESOLVED",
+                    boundary_basis="TASK_COMPLETE",
                     state_delta={"mode": "NOOP", "summary": "", "operations": []},
                     retrieval_query="Alpha final evidence",
                 )
@@ -121,6 +124,11 @@ class OnlineMemoryTests(unittest.TestCase):
         self.assertEqual(session.traces[-1].task_status, "READY_TO_ANSWER")
         self.assertIn("Do not call tools", final_prompt[0]["content"])
         self.assertIn("Alpha is supported", final_prompt[-2]["content"])
+        messages.append({"role": "assistant", "content": "Exact Answer: Alpha\nConfidence: 99%"})
+        session.finalize(messages)
+        self.assertEqual(session.state.state_version, 1)
+        self.assertEqual(session.completed_loops[-1].subgoal, "verify Alpha")
+        self.assertIn("Exact Answer: Alpha", session.completed_loops[-1].conclusion)
 
     def test_unified_boundary_archives_the_turn_that_completed_the_work_unit(self):
         class WorkUnitController:

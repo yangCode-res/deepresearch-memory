@@ -159,6 +159,7 @@ class OnlineMemorySession:
         first = assistants[0].text if assistants else "research step"
         subgoal = (
             (decision.current_loop_subgoal if decision else "").strip()
+            or self._current_loop_subgoal.strip()
             or first.splitlines()[0][:240]
             or "research step"
         )
@@ -206,9 +207,10 @@ class OnlineMemorySession:
                         self.anchor, self.state, loop, planned_state_delta
                     )
             elif self.unified_controller:
-                # Finalization is deterministic; the unified controller has already
-                # made all online state decisions.
-                update = self.state_updater.fallback.update(self.anchor, self.state, loop)
+                # The controller already made all online state decisions. The
+                # final answer remains durable in Loop Memory; copying a whole
+                # answer transcript into Global State would pollute it.
+                update = None
             else:
                 update = self.state_updater.update(self.anchor, self.state, loop)
             if update is not None:
@@ -431,7 +433,11 @@ class OnlineMemorySession:
         return prompt_messages
 
     def finalize(self, canonical_messages: list[dict[str, Any]]) -> None:
-        self.ingest_new_messages(canonical_messages)
+        # Task termination is already known here. Preserve any final assistant
+        # message without paying for another control-plane decision.
+        new_messages = canonical_messages[self._known_message_count :]
+        self._known_message_count = len(canonical_messages)
+        self.current_events.extend(self._event(message) for message in new_messages)
         self._archive_current_loop(None)
 
     def trace_payload(self) -> dict[str, Any]:

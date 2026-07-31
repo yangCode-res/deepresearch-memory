@@ -14,6 +14,7 @@ import multiprocessing as mp
 import os
 from pathlib import Path
 import sys
+import re
 from typing import Any
 
 
@@ -100,6 +101,8 @@ class MemoryTokenizerRouter:
             f"loop_messages={latest.current_loop_message_count} state_v={latest.state_version} "
             f"retrieved={len(latest.retrieved_memory_ids)} switched={latest.loop_switched}"
         )
+        if latest.task_status == "READY_TO_ANSWER":
+            raise ReadyToAnswerSignal(question, messages, compact_messages)
         return self._tokenizer.apply_chat_template(compact_messages, *args, **kwargs)
 
     def finalize(self, question: str, messages: list[dict[str, Any]]) -> None:
@@ -122,6 +125,95 @@ class MemoryTokenizerRouter:
 _baseline_run_one = openresearcher.run_one
 
 
+class ReadyToAnswerSignal(Exception):
+    """Unwind the vendor research loop before it can execute another tool."""
+
+    def __init__(
+        self,
+        question: str,
+        canonical_messages: list[dict[str, Any]],
+        compact_messages: list[dict[str, Any]],
+    ) -> None:
+        super().__init__("CL-GISM controller marked the task READY_TO_ANSWER")
+        self.question = question
+        self.canonical_messages = [dict(message) for message in canonical_messages]
+        self.compact_messages = [dict(message) for message in compact_messages]
+
+
+def _final_answer_messages(signal: ReadyToAnswerSignal) -> list[dict[str, Any]]:
+    messages = [dict(message) for message in signal.compact_messages]
+    system = dict(messages[0])
+    prior_system = str(system.get("content") or "")
+    memory_marker = prior_system.find("<cross_loop_memory>")
+    evidence_context = prior_system[memory_marker:] if memory_marker >= 0 else ""
+    system["content"] = (
+        "You are the final answer synthesizer. Research is complete. Do not call, mention, or request "
+        "any tool. Use only the evidence and citations already contained in these messages. Return the "
+        "answer now in exactly three sections: Explanation, Exact Answer, and Confidence. Preserve valid "
+        "citation markers. If a minor corroborating detail is uncertain, disclose it briefly instead of "
+        "searching again.\n\n"
+        + evidence_context
+    )
+    messages[0] = system
+    return messages
+
+
+def _split_final_content(text: str) -> tuple[str, str | None]:
+    reasoning = None
+    match = re.search(r"<think>(.*?)</think>", text, re.DOTALL)
+    if match:
+        reasoning = match.group(1).strip()
+        text = text.replace(match.group(0), "").strip()
+    elif "</think>" in text:
+        reasoning, text = text.split("</think>", 1)
+        reasoning = reasoning.strip()
+        text = text.strip()
+    return text, reasoning
+
+
+async def _force_final_answer(
+    signal: ReadyToAnswerSignal,
+    generator: Any,
+) -> list[dict[str, Any]]:
+    router: MemoryTokenizerRouter = generator.tokenizer
+    final_messages = _final_answer_messages(signal)
+    print("[CL-GISM] READY_TO_ANSWER: research loop stopped; forcing one tool-free final generation")
+    content = ""
+    reasoning = None
+    for attempt in range(2):
+        prompt = router._tokenizer.apply_chat_template(
+            final_messages,
+            tools=[],
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        tokens = router._tokenizer.encode(prompt, add_special_tokens=False)
+        generated = await openresearcher._generate_with_retry(
+            generator, tokens, ["\n<tool_response>", "<tool_response>"]
+        )
+        content, reasoning = _split_final_content(generated)
+        if "<tool_call>" not in content and "</tool_call>" not in content:
+            break
+        print(f"[CL-GISM] final synthesis attempted a tool call (attempt {attempt + 1}); retrying")
+        final_messages[0]["content"] = (
+            "Your previous attempt incorrectly requested a tool. No tools exist in final synthesis. "
+            "Output Explanation, Exact Answer, and Confidence immediately.\n\n"
+            + str(final_messages[0].get("content") or "")
+        )
+    else:
+        raise RuntimeError("final synthesis attempted tool calls twice despite tool-free enforcement")
+    messages = list(signal.canonical_messages)
+    messages.append(
+        {
+            "role": "assistant",
+            "content": content,
+            "reasoning_content": reasoning,
+            "tool_calls": None,
+        }
+    )
+    return messages
+
+
 async def run_one_with_memory(
     question: str,
     qid: Any,
@@ -139,13 +231,16 @@ async def run_one_with_memory(
     router: MemoryTokenizerRouter = generator.tokenizer
     system_prompt = openresearcher.DEVELOPER_CONTENT
     router.register(question=question, qid=qid, system_prompt=system_prompt)
-    messages = await _baseline_run_one(
-        question=question,
-        qid=qid,
-        generator=generator,
-        browser_pool=browser_pool,
-        max_rounds=max_rounds,
-    )
+    try:
+        messages = await _baseline_run_one(
+            question=question,
+            qid=qid,
+            generator=generator,
+            browser_pool=browser_pool,
+            max_rounds=max_rounds,
+        )
+    except ReadyToAnswerSignal as signal:
+        messages = await _force_final_answer(signal, generator)
     router.finalize(question, messages)
     return messages
 

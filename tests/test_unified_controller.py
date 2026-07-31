@@ -280,6 +280,44 @@ class UnifiedControllerTests(unittest.TestCase):
             "test whether cache misses cause latency",
         )
 
+    def test_rejects_drift_from_the_committed_current_subgoal(self):
+        class DriftingClient:
+            def __init__(self):
+                self.calls = 0
+
+            def complete_json(self, system_prompt, user_prompt):
+                self.calls += 1
+                return {
+                    "task_status": "CONTINUE",
+                    "research_phase": "DISCOVERY",
+                    "loop": {
+                        "switch": False,
+                        "reason": "incorrectly regressed to an older search thread",
+                        "confidence": 0.7,
+                        "current_loop_subgoal": "identify the city from its tower",
+                        "next_loop_subgoal": "",
+                        "outcome": "IN_PROGRESS",
+                        "boundary_basis": "NONE",
+                    },
+                    "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
+                    "retrieval": {"query": "city tower", "selected_memory_ids": [], "reason": ""},
+                }
+
+        anchor = TaskAnchor(task_id="task_commitment", original_goal="Identify the brand")
+        state = HeuristicStateUpdater().initialize(anchor)
+        client = DriftingClient()
+        with self.assertRaisesRegex(ValueError, "must exactly copy"):
+            UnifiedMemoryController(client).decide(
+                anchor=anchor,
+                state=state,
+                current_loop=[],
+                latest_events=[],
+                candidates=[],
+                current_phase="DISCOVERY",
+                current_loop_subgoal="identify the brand from its naming history",
+            )
+        self.assertEqual(client.calls, 2)
+
 
 if __name__ == "__main__":
     unittest.main()
