@@ -280,7 +280,7 @@ class UnifiedControllerTests(unittest.TestCase):
             "test whether cache misses cause latency",
         )
 
-    def test_rejects_drift_from_the_committed_current_subgoal(self):
+    def test_system_overrides_drift_from_the_committed_current_subgoal(self):
         class DriftingClient:
             def __init__(self):
                 self.calls = 0
@@ -306,17 +306,20 @@ class UnifiedControllerTests(unittest.TestCase):
         anchor = TaskAnchor(task_id="task_commitment", original_goal="Identify the brand")
         state = HeuristicStateUpdater().initialize(anchor)
         client = DriftingClient()
-        with self.assertRaisesRegex(ValueError, "must exactly copy"):
-            UnifiedMemoryController(client).decide(
-                anchor=anchor,
-                state=state,
-                current_loop=[],
-                latest_events=[],
-                candidates=[],
-                current_phase="DISCOVERY",
-                current_loop_subgoal="identify the brand from its naming history",
-            )
-        self.assertEqual(client.calls, 2)
+        decision = UnifiedMemoryController(client).decide(
+            anchor=anchor,
+            state=state,
+            current_loop=[],
+            latest_events=[],
+            candidates=[],
+            current_phase="DISCOVERY",
+            current_loop_subgoal="identify the brand from its naming history",
+        )
+        self.assertEqual(client.calls, 1)
+        self.assertEqual(
+            decision.current_loop_subgoal,
+            "identify the brand from its naming history",
+        )
 
 
 if __name__ == "__main__":

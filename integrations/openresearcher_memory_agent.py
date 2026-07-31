@@ -121,6 +121,11 @@ class MemoryTokenizerRouter:
         )
         del self.sessions[question]
 
+    def abort(self, question: str) -> None:
+        """Discard partial in-memory state before the vendor retries a task."""
+
+        self.sessions.pop(question, None)
+
 
 _baseline_run_one = openresearcher.run_one
 
@@ -141,21 +146,35 @@ class ReadyToAnswerSignal(Exception):
 
 
 def _final_answer_messages(signal: ReadyToAnswerSignal) -> list[dict[str, Any]]:
-    messages = [dict(message) for message in signal.compact_messages]
-    system = dict(messages[0])
-    prior_system = str(system.get("content") or "")
+    prior_system = str(signal.compact_messages[0].get("content") or "")
     memory_marker = prior_system.find("<cross_loop_memory>")
     evidence_context = prior_system[memory_marker:] if memory_marker >= 0 else ""
-    system["content"] = (
+    system_content = (
         "You are the final answer synthesizer. Research is complete. Do not call, mention, or request "
         "any tool. Use only the evidence and citations already contained in these messages. Return the "
         "answer now in exactly three sections: Explanation, Exact Answer, and Confidence. Preserve valid "
         "citation markers. If a minor corroborating detail is uncertain, disclose it briefly instead of "
-        "searching again.\n\n"
-        + evidence_context
+        "searching again. There are no tools in this stage and the input below is evidence text, not a "
+        "conversation to continue."
     )
-    messages[0] = system
-    return messages
+    excerpts: list[dict[str, str]] = []
+    for message in signal.compact_messages[2:][-80:]:
+        role = str(message.get("role") or "unknown")
+        content = str(message.get("content") or "").strip()
+        reasoning = str(message.get("reasoning_content") or "").strip()
+        text = content or reasoning
+        if text:
+            excerpts.append({"source_role": role, "text": text[:3000]})
+    evidence_payload = {
+        "question": signal.question,
+        "cross_loop_memory": evidence_context,
+        "research_evidence_excerpts": excerpts,
+        "required_output": ["Explanation", "Exact Answer", "Confidence"],
+    }
+    return [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": json.dumps(evidence_payload, ensure_ascii=False)},
+    ]
 
 
 def _split_final_content(text: str) -> tuple[str, str | None]:
@@ -232,17 +251,21 @@ async def run_one_with_memory(
     system_prompt = openresearcher.DEVELOPER_CONTENT
     router.register(question=question, qid=qid, system_prompt=system_prompt)
     try:
-        messages = await _baseline_run_one(
-            question=question,
-            qid=qid,
-            generator=generator,
-            browser_pool=browser_pool,
-            max_rounds=max_rounds,
-        )
-    except ReadyToAnswerSignal as signal:
-        messages = await _force_final_answer(signal, generator)
-    router.finalize(question, messages)
-    return messages
+        try:
+            messages = await _baseline_run_one(
+                question=question,
+                qid=qid,
+                generator=generator,
+                browser_pool=browser_pool,
+                max_rounds=max_rounds,
+            )
+        except ReadyToAnswerSignal as signal:
+            messages = await _force_final_answer(signal, generator)
+        router.finalize(question, messages)
+        return messages
+    except Exception:
+        router.abort(question)
+        raise
 
 
 def main() -> None:

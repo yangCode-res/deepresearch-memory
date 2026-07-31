@@ -81,8 +81,10 @@ class ForcedFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(calls, 1)
         self.assertEqual(underlying.tools, [])
+        self.assertEqual(len(underlying.messages), 2)
         self.assertNotIn("research with tools", underlying.messages[0]["content"])
-        self.assertIn("<cross_loop_memory>", underlying.messages[0]["content"])
+        self.assertIn("<cross_loop_memory>", underlying.messages[1]["content"])
+        self.assertNotIn('"role": "tool"', underlying.messages[1]["content"])
         self.assertEqual(messages[-1]["tool_calls"], None)
         self.assertIn("Exact Answer: Alpha", messages[-1]["content"])
         self.assertEqual(messages[-1]["reasoning_content"], "Use the verified evidence.")

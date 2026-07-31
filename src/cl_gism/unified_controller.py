@@ -199,7 +199,7 @@ class UnifiedMemoryController:
             },
             "rules": [
                 "First infer the primary subgoal and its completion test; judge the boundary from that work-unit contract, not from topic words or tool-call count.",
-                "committed_current_loop_subgoal is authoritative. When it is non-empty, copy it exactly into loop.current_loop_subgoal; only loop.next_loop_subgoal may propose the next commitment.",
+                "committed_current_loop_subgoal is authoritative. Treat it as the current work-unit contract; only loop.next_loop_subgoal may propose the next commitment.",
                 "Return READY_TO_ANSWER when the answer is stable, the task's core success criteria have adequate citable support, unresolved details cannot reasonably change the exact answer, and further search has low expected information gain.",
                 "Do not require equal-strength direct citations for every clue: distinguish identity-critical claims from corroborating clues and disclose residual uncertainty in the final answer.",
                 "Return SWITCH_LOOP when the completed/current work unit is terminal and the next call will pursue a different primary subgoal or completion test. The research phase may stay the same.",
@@ -237,10 +237,13 @@ class UnifiedMemoryController:
             else:
                 current_prompt = user_prompt
             raw = self.client.complete_json(system_prompt, current_prompt)
+            # Current-loop identity is system-owned state, not model-owned
+            # output. Preserve the model's first label only when establishing
+            # the initial commitment; afterwards overwrite any echo drift.
+            if current_loop_subgoal and isinstance(raw.get("loop"), dict):
+                raw["loop"]["current_loop_subgoal"] = current_loop_subgoal
             try:
-                self._validate_contract(
-                    raw, state, allowed_ids, current_phase, current_loop_subgoal
-                )
+                self._validate_contract(raw, state, allowed_ids, current_phase)
                 break
             except ValueError as exc:
                 last_error = str(exc)
@@ -282,7 +285,6 @@ class UnifiedMemoryController:
         state: GlobalIntentState,
         allowed_ids: set[str],
         current_phase: str,
-        committed_subgoal: str = "",
     ) -> None:
         if not isinstance(raw, dict):
             raise ValueError("response must be an object")
@@ -315,10 +317,6 @@ class UnifiedMemoryController:
         next_subgoal = str(loop.get("next_loop_subgoal") or "").strip()
         if not current_subgoal:
             raise ValueError("loop.current_loop_subgoal cannot be empty")
-        if committed_subgoal and current_subgoal != committed_subgoal:
-            raise ValueError(
-                "loop.current_loop_subgoal must exactly copy committed_current_loop_subgoal"
-            )
         if task_status == "CONTINUE" and (outcome != "IN_PROGRESS" or boundary_basis != "NONE"):
             raise ValueError("CONTINUE requires outcome=IN_PROGRESS and boundary_basis=NONE")
         if task_status == "SWITCH_LOOP":
