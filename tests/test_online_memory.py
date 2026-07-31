@@ -97,6 +97,18 @@ class OnlineMemoryTests(unittest.TestCase):
                     current_loop_subgoal="verify Alpha",
                     loop_outcome="RESOLVED",
                     boundary_basis="TASK_COMPLETE",
+                    loop_progress={
+                        "completion_test": "identify Alpha",
+                        "progress_summary": "Alpha is fully verified",
+                        "resolved_aspects": ["answer identity"],
+                        "open_aspects": [],
+                        "key_evidence": ["Alpha is supported 【1†L1-L3】"],
+                        "candidate_answer": "Alpha",
+                        "answer_stable": True,
+                        "evidence_sufficient": True,
+                        "confidence": 0.99,
+                        "expected_information_gain": "LOW",
+                    },
                     state_delta={"mode": "NOOP", "summary": "", "operations": []},
                     retrieval_query="Alpha final evidence",
                 )
@@ -124,6 +136,7 @@ class OnlineMemoryTests(unittest.TestCase):
         self.assertEqual(session.traces[-1].task_status, "READY_TO_ANSWER")
         self.assertIn("Do not call tools", final_prompt[0]["content"])
         self.assertIn("Alpha is supported", final_prompt[-2]["content"])
+        self.assertIn("loop_working_state", final_prompt[0]["content"])
         messages.append({"role": "assistant", "content": "Exact Answer: Alpha\nConfidence: 99%"})
         session.finalize(messages)
         self.assertEqual(session.state.state_version, 1)

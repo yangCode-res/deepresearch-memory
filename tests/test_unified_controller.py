@@ -75,6 +75,18 @@ class UnifiedControllerTests(unittest.TestCase):
                         "next_loop_subgoal": "",
                         "outcome": "RESOLVED",
                         "boundary_basis": "TASK_COMPLETE",
+                        "progress": {
+                            "completion_test": "identify Alpha with citable evidence",
+                            "progress_summary": "Alpha is identified and supported",
+                            "resolved_aspects": ["identity", "supporting source"],
+                            "open_aspects": [],
+                            "key_evidence": ["Alpha is confirmed 【1†L1-L3】"],
+                            "candidate_answer": "Alpha",
+                            "answer_stable": True,
+                            "evidence_sufficient": True,
+                            "confidence": 0.98,
+                            "expected_information_gain": "LOW",
+                        },
                     },
                     "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
                     "retrieval": {
@@ -320,6 +332,78 @@ class UnifiedControllerTests(unittest.TestCase):
             decision.current_loop_subgoal,
             "identify the brand from its naming history",
         )
+
+    def test_loop_progress_persists_beyond_the_visible_event_window(self):
+        class ProgressClient:
+            def __init__(self):
+                self.calls = 0
+                self.inputs = []
+
+            def complete_json(self, system_prompt, user_prompt):
+                self.calls += 1
+                self.inputs.append(json.loads(user_prompt))
+                progress = (
+                    {
+                        "completion_test": "identify the brand",
+                        "progress_summary": "The founder and original brand are verified.",
+                        "resolved_aspects": ["founder", "original brand"],
+                        "open_aspects": ["youth brand name"],
+                        "key_evidence": ["Vakko was founded by Vitali Hakko 【1†L3-L7】"],
+                        "candidate_answer": "",
+                        "answer_stable": False,
+                        "evidence_sufficient": False,
+                        "confidence": 0.7,
+                        "expected_information_gain": "MEDIUM",
+                    }
+                    if self.calls == 1
+                    else {}
+                )
+                return {
+                    "task_status": "CONTINUE",
+                    "research_phase": "DISCOVERY",
+                    "loop": {
+                        "switch": False,
+                        "reason": "the same brand-identification unit continues",
+                        "confidence": 0.8,
+                        "current_loop_subgoal": "identify the brand",
+                        "next_loop_subgoal": "",
+                        "outcome": "IN_PROGRESS",
+                        "boundary_basis": "NONE",
+                        "progress": progress,
+                    },
+                    "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
+                    "retrieval": {"query": "youth brand", "selected_memory_ids": [], "reason": ""},
+                }
+
+        anchor = TaskAnchor(task_id="task_progress", original_goal="Identify the brand")
+        state = HeuristicStateUpdater().initialize(anchor)
+        client = ProgressClient()
+        controller = UnifiedMemoryController(client)
+        first = controller.decide(
+            anchor=anchor,
+            state=state,
+            current_loop=[],
+            latest_events=[],
+            candidates=[],
+        )
+        second = controller.decide(
+            anchor=anchor,
+            state=state,
+            current_loop=[],
+            latest_events=[],
+            candidates=[],
+            current_loop_subgoal="identify the brand",
+            loop_progress=first.loop_progress,
+            loop_rounds=40,
+            stagnant_rounds=2,
+        )
+
+        self.assertEqual(
+            client.inputs[1]["committed_loop_progress"]["key_evidence"],
+            ["Vakko was founded by Vitali Hakko 【1†L3-L7】"],
+        )
+        self.assertEqual(second.loop_progress["open_aspects"], ["youth brand name"])
+        self.assertEqual(client.inputs[1]["loop_runtime"]["rounds_in_current_loop"], 40)
 
 
 if __name__ == "__main__":

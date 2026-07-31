@@ -31,6 +31,53 @@ BOUNDARY_BASES = {
 }
 VALID_ITEM_STATUSES = {"active", "tentative", "confirmed", "rejected", "superseded", "resolved"}
 VALID_SOURCE_TYPES = {"user", "agent", "tool", "paper", "web", "experiment", "system"}
+INFORMATION_GAIN_LEVELS = {"HIGH", "MEDIUM", "LOW"}
+
+
+def empty_loop_progress() -> dict[str, Any]:
+    """Create ephemeral, current-loop-only progress state."""
+
+    return {
+        "completion_test": "",
+        "progress_summary": "",
+        "resolved_aspects": [],
+        "open_aspects": [],
+        "key_evidence": [],
+        "candidate_answer": "",
+        "answer_stable": False,
+        "evidence_sufficient": False,
+        "confidence": 0.0,
+        "expected_information_gain": "HIGH",
+    }
+
+
+def _normalize_loop_progress(raw: Any, previous: dict[str, Any] | None) -> dict[str, Any]:
+    prior = {**empty_loop_progress(), **(previous or {})}
+    source = raw if isinstance(raw, dict) else {}
+    normalized = dict(prior)
+    for name, limit in (("completion_test", 600), ("progress_summary", 1000), ("candidate_answer", 500)):
+        if name in source:
+            normalized[name] = str(source.get(name) or "")[:limit]
+    for name, count, limit in (
+        ("resolved_aspects", 12, 500),
+        ("open_aspects", 12, 500),
+        ("key_evidence", 12, 800),
+    ):
+        value = source.get(name)
+        if isinstance(value, list):
+            normalized[name] = [str(item)[:limit] for item in value if str(item).strip()][:count]
+    for name in ("answer_stable", "evidence_sufficient"):
+        if isinstance(source.get(name), bool):
+            normalized[name] = source[name]
+    if "confidence" in source:
+        try:
+            normalized["confidence"] = max(0.0, min(1.0, float(source["confidence"])))
+        except (TypeError, ValueError):
+            pass
+    gain = str(source.get("expected_information_gain") or "").upper()
+    if gain in INFORMATION_GAIN_LEVELS:
+        normalized["expected_information_gain"] = gain
+    return normalized
 
 
 @dataclass
@@ -44,6 +91,7 @@ class UnifiedControlDecision:
     next_loop_subgoal: str = ""
     loop_outcome: str = "IN_PROGRESS"
     boundary_basis: str = "NONE"
+    loop_progress: dict[str, Any] = field(default_factory=empty_loop_progress)
     state_delta: dict[str, Any] = field(default_factory=lambda: {"summary": "", "operations": []})
     retrieval_query: str = ""
     selected_memory_ids: list[str] = field(default_factory=list)
@@ -104,6 +152,9 @@ class UnifiedMemoryController:
         candidates: list[MemoryHit],
         current_phase: str = "DISCOVERY",
         current_loop_subgoal: str = "",
+        loop_progress: dict[str, Any] | None = None,
+        loop_rounds: int = 0,
+        stagnant_rounds: int = 0,
     ) -> UnifiedControlDecision:
         current_phase = str(current_phase or "DISCOVERY").upper()
         if current_phase not in RESEARCH_PHASES:
@@ -145,6 +196,11 @@ class UnifiedMemoryController:
             "global_state": _state(state),
             "current_research_phase": current_phase,
             "committed_current_loop_subgoal": current_loop_subgoal,
+            "committed_loop_progress": _normalize_loop_progress(loop_progress, None),
+            "loop_runtime": {
+                "rounds_in_current_loop": max(0, int(loop_rounds)),
+                "rounds_without_material_progress": max(0, int(stagnant_rounds)),
+            },
             "current_loop": [_event(event) for event in current_loop[-30:]],
             "latest_events": [_event(event) for event in latest_events],
             "memory_candidates": [
@@ -167,6 +223,7 @@ class UnifiedMemoryController:
                     "next_loop_subgoal": "short label",
                     "outcome": "IN_PROGRESS|RESOLVED|REFUTED|BLOCKED|SUPERSEDED",
                     "boundary_basis": "NONE|SUBGOAL_COMPLETED|SUBGOAL_CHANGED|CANDIDATE_CHANGED|BLOCKED_OR_SATURATED|PHASE_TRANSITION|TASK_COMPLETE",
+                    "progress": empty_loop_progress(),
                 },
                 "state_delta": {
                     "mode": "APPLY|NOOP",
@@ -200,6 +257,11 @@ class UnifiedMemoryController:
             "rules": [
                 "First infer the primary subgoal and its completion test; judge the boundary from that work-unit contract, not from topic words or tool-call count.",
                 "committed_current_loop_subgoal is authoritative. Treat it as the current work-unit contract; only loop.next_loop_subgoal may propose the next commitment.",
+                "Update loop.progress every round. It is ephemeral working memory for the current loop, not Global State. Preserve previously verified aspects and citation-bearing key evidence unless new evidence refutes them.",
+                "completion_test states what observable result closes this work unit. resolved_aspects and open_aspects form a compact coverage ledger; key_evidence stores only decisive citation-bearing facts, not search narration.",
+                "Set answer_stable=true only when remaining open aspects cannot reasonably change candidate_answer. Set evidence_sufficient=true when core success criteria have citable support; corroborating clues may retain disclosed uncertainty.",
+                "expected_information_gain estimates whether another search under the same subgoal is likely to change the answer or materially improve core evidence.",
+                "Use loop_runtime to detect unproductive repetition. Several rounds without material ledger changes require either a genuinely different strategy/subgoal, a BLOCKED outcome, or READY_TO_ANSWER when the answer is already stable.",
                 "Return READY_TO_ANSWER when the answer is stable, the task's core success criteria have adequate citable support, unresolved details cannot reasonably change the exact answer, and further search has low expected information gain.",
                 "Do not require equal-strength direct citations for every clue: distinguish identity-critical claims from corroborating clues and disclose residual uncertainty in the final answer.",
                 "Return SWITCH_LOOP when the completed/current work unit is terminal and the next call will pursue a different primary subgoal or completion test. The research phase may stay the same.",
@@ -242,6 +304,10 @@ class UnifiedMemoryController:
             # the initial commitment; afterwards overwrite any echo drift.
             if current_loop_subgoal and isinstance(raw.get("loop"), dict):
                 raw["loop"]["current_loop_subgoal"] = current_loop_subgoal
+            if isinstance(raw.get("loop"), dict):
+                raw["loop"]["progress"] = _normalize_loop_progress(
+                    raw["loop"].get("progress"), loop_progress
+                )
             try:
                 self._validate_contract(raw, state, allowed_ids, current_phase)
                 break
@@ -272,6 +338,7 @@ class UnifiedMemoryController:
             next_loop_subgoal=str(loop.get("next_loop_subgoal") or ""),
             loop_outcome=str(loop.get("outcome") or "IN_PROGRESS").upper(),
             boundary_basis=str(loop.get("boundary_basis") or "NONE").upper(),
+            loop_progress=_normalize_loop_progress(loop.get("progress"), loop_progress),
             state_delta=delta or {"summary": "", "operations": []},
             retrieval_query=str(retrieval.get("query") or ""),
             selected_memory_ids=selected,
@@ -333,6 +400,17 @@ class UnifiedMemoryController:
         ):
             raise ValueError(
                 "READY_TO_ANSWER requires RESOLVED, TASK_COMPLETE, and empty next_loop_subgoal"
+            )
+        progress = loop.get("progress")
+        if not isinstance(progress, dict):
+            raise ValueError("loop.progress must be an object")
+        if task_status == "READY_TO_ANSWER" and not (
+            progress.get("answer_stable") is True
+            and progress.get("evidence_sufficient") is True
+            and progress.get("expected_information_gain") == "LOW"
+        ):
+            raise ValueError(
+                "READY_TO_ANSWER requires stable answer, sufficient evidence, and LOW information gain"
             )
         operations = delta.get("operations")
         if not isinstance(operations, list):
@@ -402,4 +480,4 @@ class UnifiedMemoryController:
             raise ValueError("retrieval contains unknown memory IDs")
 
 
-__all__ = ["UnifiedControlDecision", "UnifiedMemoryController"]
+__all__ = ["UnifiedControlDecision", "UnifiedMemoryController", "empty_loop_progress"]

@@ -11,7 +11,7 @@ from .llm_state_update import LLMStateUpdater
 from .retrieval import LexicalMemoryIndex, MemoryHit, build_retrieval_query
 from .schema import LoopMemory, MemoryStatus, RawMemory, SourceType, TaskAnchor, utc_now
 from .trajectory import TrajectoryEvent
-from .unified_controller import UnifiedMemoryController
+from .unified_controller import UnifiedMemoryController, empty_loop_progress
 
 
 def _message_text(message: dict[str, Any]) -> str:
@@ -71,6 +71,9 @@ class OnlineMemoryTrace:
     next_loop_subgoal: str = ""
     loop_outcome: str = "IN_PROGRESS"
     boundary_basis: str = "NONE"
+    loop_progress: dict[str, Any] = field(default_factory=empty_loop_progress)
+    loop_rounds: int = 0
+    stagnant_rounds: int = 0
     controller_error: str | None = None
     controller_validation_retries: int = 0
     controller_response: dict[str, Any] | None = None
@@ -124,6 +127,9 @@ class OnlineMemorySession:
         self._task_status = "CONTINUE"
         self._research_phase = "DISCOVERY"
         self._current_loop_subgoal = ""
+        self._loop_progress = empty_loop_progress()
+        self._loop_rounds = 0
+        self._stagnant_rounds = 0
         self._just_archived_memory_ids: list[str] = []
 
     def _event(self, message: dict[str, Any]) -> TrajectoryEvent:
@@ -175,6 +181,11 @@ class OnlineMemorySession:
                 value = str(operation.get("value") or "").strip()
                 if value:
                     durable_parts.append(f"{target}: {value}")
+            progress_summary = str(self._loop_progress.get("progress_summary") or "").strip()
+            if progress_summary:
+                durable_parts.append(f"loop_progress: {progress_summary}")
+            for evidence in self._loop_progress.get("key_evidence") or []:
+                durable_parts.append(f"key_evidence: {evidence}")
         conclusion = "\n".join(durable_parts)[:2400] or (
             assistants[-1].text[:2400] if assistants else tools[-1].text[:2400] if tools else None
         )
@@ -257,6 +268,9 @@ class OnlineMemorySession:
                     candidates=candidates,
                     current_phase=self._research_phase,
                     current_loop_subgoal=self._current_loop_subgoal,
+                    loop_progress=self._loop_progress,
+                    loop_rounds=self._loop_rounds + 1,
+                    stagnant_rounds=self._stagnant_rounds,
                 )
                 self._last_control = control
                 self._task_status = control.task_status
@@ -277,6 +291,15 @@ class OnlineMemorySession:
                     if memory_id in by_id
                 ]
                 self._controller_succeeded = True
+                previous_signature = self._progress_signature(self._loop_progress)
+                next_progress = control.loop_progress
+                next_signature = self._progress_signature(next_progress)
+                if previous_signature and previous_signature == next_signature:
+                    self._stagnant_rounds += 1
+                else:
+                    self._stagnant_rounds = 0
+                self._loop_progress = next_progress
+                self._loop_rounds += 1
                 # The latest events are the completed model/tool turn that the
                 # controller just evaluated. They belong to the current work
                 # unit; a switch affects the *next* model call.
@@ -287,6 +310,9 @@ class OnlineMemorySession:
                         decision.split = False
                     else:
                         self._current_loop_subgoal = control.next_loop_subgoal
+                        self._loop_progress = empty_loop_progress()
+                        self._loop_rounds = 0
+                        self._stagnant_rounds = 0
                 elif control.current_loop_subgoal:
                     self._current_loop_subgoal = control.current_loop_subgoal
                 self._research_phase = control.research_phase
@@ -297,6 +323,8 @@ class OnlineMemorySession:
                     f"unified_controller:{exc.__class__.__name__}: {detail}"
                 )
                 self.current_events.extend(latest_events)
+                self._loop_rounds += 1
+                self._stagnant_rounds += 1
             return
         for message in new_messages:
             event = self._event(message)
@@ -332,6 +360,18 @@ class OnlineMemorySession:
             "next_actions": _compact_state_items(self.state.next_actions),
         }
 
+    @staticmethod
+    def _progress_signature(progress: dict[str, Any]) -> str:
+        durable = {
+            "resolved_aspects": progress.get("resolved_aspects") or [],
+            "open_aspects": progress.get("open_aspects") or [],
+            "key_evidence": progress.get("key_evidence") or [],
+            "candidate_answer": progress.get("candidate_answer") or "",
+            "answer_stable": bool(progress.get("answer_stable")),
+            "evidence_sufficient": bool(progress.get("evidence_sufficient")),
+        }
+        return json.dumps(durable, ensure_ascii=False, sort_keys=True)
+
     def _memory_block(self, query: str, hits: list[MemoryHit]) -> str:
         memories = [
             {
@@ -354,6 +394,11 @@ class OnlineMemorySession:
                 "task_status": self._task_status,
                 "research_phase": self._research_phase,
                 "current_loop_subgoal": self._current_loop_subgoal,
+                "loop_working_state": self._loop_progress,
+                "loop_runtime": {
+                    "rounds_in_current_loop": self._loop_rounds,
+                    "rounds_without_material_progress": self._stagnant_rounds,
+                },
                 "instruction": (
                     "All success criteria have sufficient citable evidence. Do not call any more tools. "
                     "Produce the final answer now as Explanation, Exact Answer, and Confidence, using "
@@ -421,6 +466,11 @@ class OnlineMemorySession:
                 next_loop_subgoal=getattr(getattr(self, "_last_control", None), "next_loop_subgoal", ""),
                 loop_outcome=getattr(getattr(self, "_last_control", None), "loop_outcome", "IN_PROGRESS"),
                 boundary_basis=getattr(getattr(self, "_last_control", None), "boundary_basis", "NONE"),
+                loop_progress=getattr(
+                    getattr(self, "_last_control", None), "loop_progress", self._loop_progress
+                ),
+                loop_rounds=self._loop_rounds,
+                stagnant_rounds=self._stagnant_rounds,
                 controller_error=getattr(self._pending_switch, "controller_error", None),
                 controller_validation_retries=getattr(
                     getattr(self, "_last_control", None), "validation_retries", 0
