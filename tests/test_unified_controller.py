@@ -1,4 +1,5 @@
 import unittest
+import json
 
 from cl_gism import (
     HeuristicStateUpdater,
@@ -19,6 +20,8 @@ class FakeClient:
                 "confidence": 0.94,
                 "current_loop_subgoal": "find candidate",
                 "next_loop_subgoal": "verify candidate",
+                "outcome": "RESOLVED",
+                "boundary_basis": "PHASE_TRANSITION",
             },
             "state_delta": {
                 "mode": "APPLY",
@@ -70,6 +73,8 @@ class UnifiedControllerTests(unittest.TestCase):
                         "confidence": 0.98,
                         "current_loop_subgoal": "verify Alpha",
                         "next_loop_subgoal": "",
+                        "outcome": "RESOLVED",
+                        "boundary_basis": "TASK_COMPLETE",
                     },
                     "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
                     "retrieval": {
@@ -107,6 +112,8 @@ class UnifiedControllerTests(unittest.TestCase):
                         "confidence": 0.9,
                         "current_loop_subgoal": "search",
                         "next_loop_subgoal": "verify",
+                        "outcome": "RESOLVED",
+                        "boundary_basis": "SUBGOAL_COMPLETED",
                     },
                     "state_delta": {
                         "mode": "APPLY",
@@ -136,34 +143,142 @@ class UnifiedControllerTests(unittest.TestCase):
             )
         self.assertEqual(client.calls, 2)
 
-    def test_phase_change_requires_loop_switch(self):
-        class InconsistentClient:
+    def test_same_phase_allows_a_new_independently_decidable_subgoal(self):
+        class SamePhaseSwitchClient:
             def complete_json(self, system_prompt, user_prompt):
                 return {
-                    "task_status": "CONTINUE",
+                    "task_status": "SWITCH_LOOP",
                     "research_phase": "CANDIDATE_VERIFICATION",
                     "loop": {
-                        "switch": False,
-                        "reason": "candidate was identified but continue was incorrectly selected",
+                        "switch": True,
+                        "reason": "the first claim is resolved; verify a separate claim next",
                         "confidence": 0.9,
-                        "current_loop_subgoal": "discover candidate",
-                        "next_loop_subgoal": "verify candidate",
+                        "current_loop_subgoal": "verify Alpha's publication",
+                        "next_loop_subgoal": "verify Alpha's appointment",
+                        "outcome": "RESOLVED",
+                        "boundary_basis": "SUBGOAL_COMPLETED",
                     },
-                    "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
-                    "retrieval": {"query": "Alpha", "selected_memory_ids": [], "reason": ""},
+                    "state_delta": {
+                        "mode": "APPLY",
+                        "summary": "publication verified",
+                        "operations": [{
+                            "operation": "ADD",
+                            "target": "resolved_findings",
+                            "value": "Alpha's publication is verified.",
+                            "reason": "the current work unit met its completion test",
+                            "evidence_ids": [],
+                            "target_item_ids": [],
+                        }],
+                    },
+                    "retrieval": {
+                        "query": "Alpha appointment",
+                        "selected_memory_ids": [],
+                        "reason": "start the next verification unit",
+                    },
                 }
 
         anchor = TaskAnchor(task_id="task_phase", original_goal="Find Alpha")
         state = HeuristicStateUpdater().initialize(anchor)
-        with self.assertRaisesRegex(ValueError, "CONTINUE must keep"):
-            UnifiedMemoryController(InconsistentClient()).decide(
+        decision = UnifiedMemoryController(SamePhaseSwitchClient()).decide(
+            anchor=anchor,
+            state=state,
+            current_loop=[],
+            latest_events=[],
+            candidates=[],
+            current_phase="CANDIDATE_VERIFICATION",
+            current_loop_subgoal="verify Alpha's publication",
+        )
+        self.assertTrue(decision.switch_loop)
+        self.assertEqual(decision.research_phase, "CANDIDATE_VERIFICATION")
+        self.assertEqual(decision.boundary_basis, "SUBGOAL_COMPLETED")
+
+    def test_rejects_switch_while_current_work_unit_is_in_progress(self):
+        class InvalidBoundaryClient:
+            def complete_json(self, system_prompt, user_prompt):
+                return {
+                    "task_status": "SWITCH_LOOP",
+                    "research_phase": "CANDIDATE_VERIFICATION",
+                    "loop": {
+                        "switch": True,
+                        "reason": "incorrect premature switch",
+                        "confidence": 0.8,
+                        "current_loop_subgoal": "verify publication",
+                        "next_loop_subgoal": "verify appointment",
+                        "outcome": "IN_PROGRESS",
+                        "boundary_basis": "SUBGOAL_CHANGED",
+                    },
+                    "state_delta": {
+                        "mode": "APPLY",
+                        "summary": "premature",
+                        "operations": [{
+                            "operation": "ADD",
+                            "target": "uncertainties",
+                            "value": "Publication verification is incomplete.",
+                            "reason": "the claim is not resolved",
+                            "evidence_ids": [],
+                            "target_item_ids": [],
+                        }],
+                    },
+                    "retrieval": {"query": "next", "selected_memory_ids": [], "reason": ""},
+                }
+
+        anchor = TaskAnchor(task_id="task_boundary", original_goal="Find Alpha")
+        state = HeuristicStateUpdater().initialize(anchor)
+        with self.assertRaisesRegex(ValueError, "terminal outcome"):
+            UnifiedMemoryController(InvalidBoundaryClient()).decide(
                 anchor=anchor,
                 state=state,
                 current_loop=[],
                 latest_events=[],
                 candidates=[],
-                current_phase="DISCOVERY",
+                current_phase="CANDIDATE_VERIFICATION",
             )
+
+    def test_prompt_uses_a_domain_general_work_unit_contract(self):
+        class RecordingClient:
+            def __init__(self):
+                self.system_prompt = ""
+                self.payload = {}
+
+            def complete_json(self, system_prompt, user_prompt):
+                self.system_prompt = system_prompt
+                self.payload = json.loads(user_prompt)
+                return {
+                    "task_status": "CONTINUE",
+                    "research_phase": "DISCOVERY",
+                    "loop": {
+                        "switch": False,
+                        "reason": "the same diagnostic hypothesis is still being tested",
+                        "confidence": 0.8,
+                        "current_loop_subgoal": "test whether cache misses cause latency",
+                        "next_loop_subgoal": "",
+                        "outcome": "IN_PROGRESS",
+                        "boundary_basis": "NONE",
+                    },
+                    "state_delta": {"mode": "NOOP", "summary": "", "operations": []},
+                    "retrieval": {"query": "cache miss latency", "selected_memory_ids": [], "reason": ""},
+                }
+
+        anchor = TaskAnchor(task_id="task_diagnosis", original_goal="Diagnose API latency")
+        state = HeuristicStateUpdater().initialize(anchor)
+        client = RecordingClient()
+        UnifiedMemoryController(client).decide(
+            anchor=anchor,
+            state=state,
+            current_loop=[],
+            latest_events=[],
+            candidates=[],
+            current_phase="DISCOVERY",
+            current_loop_subgoal="test whether cache misses cause latency",
+        )
+
+        self.assertIn("locally decidable subgoal", client.system_prompt)
+        self.assertIn("diagnosing one cause", client.system_prompt)
+        self.assertIn("orthogonal macro label", client.system_prompt)
+        self.assertEqual(
+            client.payload["committed_current_loop_subgoal"],
+            "test whether cache misses cause latency",
+        )
 
 
 if __name__ == "__main__":

@@ -67,6 +67,10 @@ class OnlineMemoryTrace:
     loop_reason: str = ""
     task_status: str = "CONTINUE"
     research_phase: str = "DISCOVERY"
+    current_loop_subgoal: str = ""
+    next_loop_subgoal: str = ""
+    loop_outcome: str = "IN_PROGRESS"
+    boundary_basis: str = "NONE"
     controller_error: str | None = None
     controller_validation_retries: int = 0
     controller_response: dict[str, Any] | None = None
@@ -119,6 +123,7 @@ class OnlineMemorySession:
         self._last_control = None
         self._task_status = "CONTINUE"
         self._research_phase = "DISCOVERY"
+        self._current_loop_subgoal = ""
         self._just_archived_memory_ids: list[str] = []
 
     def _event(self, message: dict[str, Any]) -> TrajectoryEvent:
@@ -249,6 +254,7 @@ class OnlineMemorySession:
                     latest_events=latest_events,
                     candidates=candidates,
                     current_phase=self._research_phase,
+                    current_loop_subgoal=self._current_loop_subgoal,
                 )
                 self._last_control = control
                 self._task_status = control.task_status
@@ -269,10 +275,18 @@ class OnlineMemorySession:
                     if memory_id in by_id
                 ]
                 self._controller_succeeded = True
+                # The latest events are the completed model/tool turn that the
+                # controller just evaluated. They belong to the current work
+                # unit; a switch affects the *next* model call.
+                self.current_events.extend(latest_events)
                 if decision.split and self.current_events:
                     archived = self._archive_current_loop(decision, control.state_delta)
                     if not archived:
                         decision.split = False
+                    else:
+                        self._current_loop_subgoal = control.next_loop_subgoal
+                elif control.current_loop_subgoal:
+                    self._current_loop_subgoal = control.current_loop_subgoal
                 self._research_phase = control.research_phase
             except Exception as exc:
                 self._pending_switch = LoopBoundaryDecision(False, "controller fallback", 0.0)
@@ -280,7 +294,7 @@ class OnlineMemorySession:
                 self._pending_switch.controller_error = (
                     f"unified_controller:{exc.__class__.__name__}: {detail}"
                 )
-            self.current_events.extend(latest_events)
+                self.current_events.extend(latest_events)
             return
         for message in new_messages:
             event = self._event(message)
@@ -337,6 +351,7 @@ class OnlineMemorySession:
             "research_control": {
                 "task_status": self._task_status,
                 "research_phase": self._research_phase,
+                "current_loop_subgoal": self._current_loop_subgoal,
                 "instruction": (
                     "All success criteria have sufficient citable evidence. Do not call any more tools. "
                     "Produce the final answer now as Explanation, Exact Answer, and Confidence, using "
@@ -400,6 +415,10 @@ class OnlineMemorySession:
                 loop_reason=self._pending_switch.reason,
                 task_status=self._task_status,
                 research_phase=self._research_phase,
+                current_loop_subgoal=self._current_loop_subgoal,
+                next_loop_subgoal=getattr(getattr(self, "_last_control", None), "next_loop_subgoal", ""),
+                loop_outcome=getattr(getattr(self, "_last_control", None), "loop_outcome", "IN_PROGRESS"),
+                boundary_basis=getattr(getattr(self, "_last_control", None), "boundary_basis", "NONE"),
                 controller_error=getattr(self._pending_switch, "controller_error", None),
                 controller_validation_retries=getattr(
                     getattr(self, "_last_control", None), "validation_retries", 0

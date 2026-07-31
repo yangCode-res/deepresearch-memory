@@ -19,6 +19,16 @@ RESEARCH_PHASES = {
     "EVIDENCE_COMPLETION",
     "ANSWER_SYNTHESIS",
 }
+LOOP_OUTCOMES = {"IN_PROGRESS", "RESOLVED", "REFUTED", "BLOCKED", "SUPERSEDED"}
+BOUNDARY_BASES = {
+    "NONE",
+    "SUBGOAL_COMPLETED",
+    "SUBGOAL_CHANGED",
+    "CANDIDATE_CHANGED",
+    "BLOCKED_OR_SATURATED",
+    "PHASE_TRANSITION",
+    "TASK_COMPLETE",
+}
 VALID_ITEM_STATUSES = {"active", "tentative", "confirmed", "rejected", "superseded", "resolved"}
 VALID_SOURCE_TYPES = {"user", "agent", "tool", "paper", "web", "experiment", "system"}
 
@@ -32,6 +42,8 @@ class UnifiedControlDecision:
     confidence: float = 0.0
     current_loop_subgoal: str = ""
     next_loop_subgoal: str = ""
+    loop_outcome: str = "IN_PROGRESS"
+    boundary_basis: str = "NONE"
     state_delta: dict[str, Any] = field(default_factory=lambda: {"summary": "", "operations": []})
     retrieval_query: str = ""
     selected_memory_ids: list[str] = field(default_factory=list)
@@ -91,24 +103,32 @@ class UnifiedMemoryController:
         latest_events: list[TrajectoryEvent],
         candidates: list[MemoryHit],
         current_phase: str = "DISCOVERY",
+        current_loop_subgoal: str = "",
     ) -> UnifiedControlDecision:
         current_phase = str(current_phase or "DISCOVERY").upper()
         if current_phase not in RESEARCH_PHASES:
             raise ValueError(f"invalid current_phase {current_phase}")
         allowed_ids = {hit.memory_id for hit in candidates}
         system_prompt = (
-            "You are the control plane for a deep-research memory system. Return only valid JSON. "
-            "In one decision: (1) determine whether research should continue, switch to a genuinely new "
-            "semantic subgoal, or stop researching and answer; (2) if switching, describe the minimal "
-            "StateDelta learned from the completed current_loop; (3) select prior memories useful for the "
-            "next research-model call. A loop is a stable semantic subgoal, not one search query. Query "
-            "rephrasing, opening a result, collecting citations, and verifying multiple criteria for the "
-            "same candidate normally remain in the same loop. Do not switch merely because a search stalled. "
-            "Classify the next call into exactly one research phase: DISCOVERY means no concrete candidate "
-            "has been identified; CANDIDATE_VERIFICATION means a concrete candidate is being tested against "
-            "the requirements; EVIDENCE_COMPLETION means the answer candidate is stable and only missing "
-            "source or citation coverage is being filled; ANSWER_SYNTHESIS means research is complete and the "
-            "next call must answer. A phase change is a semantic loop boundary. "
+            "You are the control plane for a general deep-research memory system. Return only valid JSON. "
+            "In one decision: (1) determine whether the next model call should continue the current research "
+            "work unit, start a new work unit, or stop researching and answer; (2) if the current work unit "
+            "ends, describe the minimal durable StateDelta it produced; (3) select prior memories useful for "
+            "the next model call. A loop is one coherent research work unit organized around one primary, "
+            "locally decidable subgoal with a recognizable completion test. The subgoal may be identifying an "
+            "entity, verifying one claim, resolving one dependency, comparing a defined set of options, "
+            "testing one hypothesis, diagnosing one cause, or producing one bounded part of a deliverable. "
+            "Tool choice, query wording, source choice, role changes, and intermediate reasoning do not define "
+            "loop boundaries. Continue while the primary subgoal and its completion test remain the same. "
+            "End the loop when that subgoal is resolved, refuted, explicitly abandoned after evidence "
+            "saturation, superseded, or replaced by a different primary subgoal with a different completion "
+            "test. Do not fragment a coherent evidence-gathering cycle, but do not combine independently "
+            "decidable claims merely because they concern the same candidate or share a broad phase. "
+            "Research phase is an orthogonal macro label, not the definition of a loop and not a prerequisite "
+            "for switching loops. Classify the next call into exactly one phase: DISCOVERY means candidate or "
+            "solution formation; CANDIDATE_VERIFICATION means testing a concrete candidate or hypothesis; "
+            "EVIDENCE_COMPLETION means the answer is stable and only source or citation coverage is missing; "
+            "ANSWER_SYNTHESIS means research is complete and the next call must answer. "
             "Never solve the user's research question yourself and never invent memory IDs or evidence IDs. "
             "Operation contract: ADD may target active_subgoals, confirmed_constraints, soft_preferences, "
             "candidate_options, rejected_options, working_hypotheses, resolved_findings, open_questions, "
@@ -124,6 +144,7 @@ class UnifiedMemoryController:
             },
             "global_state": _state(state),
             "current_research_phase": current_phase,
+            "committed_current_loop_subgoal": current_loop_subgoal,
             "current_loop": [_event(event) for event in current_loop[-30:]],
             "latest_events": [_event(event) for event in latest_events],
             "memory_candidates": [
@@ -144,6 +165,8 @@ class UnifiedMemoryController:
                     "confidence": 0.8,
                     "current_loop_subgoal": "short label",
                     "next_loop_subgoal": "short label",
+                    "outcome": "IN_PROGRESS|RESOLVED|REFUTED|BLOCKED|SUPERSEDED",
+                    "boundary_basis": "NONE|SUBGOAL_COMPLETED|SUBGOAL_CHANGED|CANDIDATE_CHANGED|BLOCKED_OR_SATURATED|PHASE_TRANSITION|TASK_COMPLETE",
                 },
                 "state_delta": {
                     "mode": "APPLY|NOOP",
@@ -175,15 +198,17 @@ class UnifiedMemoryController:
                 },
             },
             "rules": [
-                "Return READY_TO_ANSWER only when the exact answer is identified and every required claim has sufficient citable evidence in current_loop, latest_events, state, or selected memories.",
-                "Return SWITCH_LOOP only for a genuinely different subgoal, candidate, or research phase; ordinary assistant/tool continuations remain CONTINUE.",
+                "First infer the primary subgoal and its completion test; judge the boundary from that work-unit contract, not from topic words or tool-call count.",
+                "Return READY_TO_ANSWER when the answer is stable, the task's core success criteria have adequate citable support, unresolved details cannot reasonably change the exact answer, and further search has low expected information gain.",
+                "Do not require equal-strength direct citations for every clue: distinguish identity-critical claims from corroborating clues and disclose residual uncertainty in the final answer.",
+                "Return SWITCH_LOOP when the completed/current work unit is terminal and the next call will pursue a different primary subgoal or completion test. The research phase may stay the same.",
+                "Return CONTINUE when the next action still serves the same primary subgoal and completion test, even if the query, source, tool, method, or intermediate hypothesis changes.",
                 "READY_TO_ANSWER and CONTINUE require loop.switch=false; SWITCH_LOOP requires loop.switch=true.",
-                "Return CONTINUE only when research_phase equals current_research_phase.",
-                "Return SWITCH_LOOP when research_phase changes between DISCOVERY, CANDIDATE_VERIFICATION, and EVIDENCE_COMPLETION.",
-                "When a candidate changes from unknown to a concrete named candidate, switch from DISCOVERY to CANDIDATE_VERIFICATION.",
-                "When the candidate is stable and the remaining work is only missing sources or citations, switch from CANDIDATE_VERIFICATION to EVIDENCE_COMPLETION.",
-                "If a candidate is rejected and broad search resumes, switch back to DISCOVERY.",
-                "READY_TO_ANSWER requires research_phase=ANSWER_SYNTHESIS and sufficient citable evidence.",
+                "For CONTINUE use outcome=IN_PROGRESS and boundary_basis=NONE.",
+                "For SWITCH_LOOP use a terminal outcome and the most specific non-NONE boundary_basis; provide distinct, non-empty current and next subgoal labels.",
+                "A failed query alone is not BLOCKED. Use BLOCKED only after reasonable alternatives are exhausted and the next call intentionally moves to another dependency or strategy.",
+                "For READY_TO_ANSWER use outcome=RESOLVED, boundary_basis=TASK_COMPLETE, research_phase=ANSWER_SYNTHESIS, and an empty next_loop_subgoal.",
+                "Phase changes often coincide with a loop boundary, but phase equality never forbids a loop switch and phase change alone never proves one.",
                 "Only emit StateDelta operations when loop.switch=true.",
                 "When switch=false, state_delta.mode must be NOOP and operations must be empty.",
                 "When switch=true, use APPLY with at least one concise operation that records the durable phase result.",
@@ -239,6 +264,8 @@ class UnifiedMemoryController:
             confidence=confidence,
             current_loop_subgoal=str(loop.get("current_loop_subgoal") or ""),
             next_loop_subgoal=str(loop.get("next_loop_subgoal") or ""),
+            loop_outcome=str(loop.get("outcome") or "IN_PROGRESS").upper(),
+            boundary_basis=str(loop.get("boundary_basis") or "NONE").upper(),
             state_delta=delta or {"summary": "", "operations": []},
             retrieval_query=str(retrieval.get("query") or ""),
             selected_memory_ids=selected,
@@ -274,16 +301,33 @@ class UnifiedMemoryController:
             raise ValueError("loop.switch must be boolean")
         if (task_status == "SWITCH_LOOP") != loop["switch"]:
             raise ValueError("SWITCH_LOOP requires loop.switch=true and other statuses require false")
-        if task_status == "CONTINUE" and research_phase != current_phase:
-            raise ValueError("CONTINUE must keep the current research phase")
-        if task_status == "SWITCH_LOOP" and research_phase == current_phase:
-            raise ValueError("SWITCH_LOOP must change the research phase")
-        if task_status == "SWITCH_LOOP" and research_phase == "ANSWER_SYNTHESIS":
-            raise ValueError("use READY_TO_ANSWER for ANSWER_SYNTHESIS")
+        outcome = str(loop.get("outcome") or "").upper()
+        boundary_basis = str(loop.get("boundary_basis") or "").upper()
+        if outcome not in LOOP_OUTCOMES:
+            raise ValueError("invalid loop.outcome")
+        if boundary_basis not in BOUNDARY_BASES:
+            raise ValueError("invalid loop.boundary_basis")
+        current_subgoal = str(loop.get("current_loop_subgoal") or "").strip()
+        next_subgoal = str(loop.get("next_loop_subgoal") or "").strip()
+        if not current_subgoal:
+            raise ValueError("loop.current_loop_subgoal cannot be empty")
+        if task_status == "CONTINUE" and (outcome != "IN_PROGRESS" or boundary_basis != "NONE"):
+            raise ValueError("CONTINUE requires outcome=IN_PROGRESS and boundary_basis=NONE")
+        if task_status == "SWITCH_LOOP":
+            if outcome == "IN_PROGRESS" or boundary_basis == "NONE":
+                raise ValueError("SWITCH_LOOP requires a terminal outcome and non-NONE boundary_basis")
+            if not next_subgoal:
+                raise ValueError("SWITCH_LOOP requires a non-empty next_loop_subgoal")
         if task_status == "READY_TO_ANSWER" and research_phase != "ANSWER_SYNTHESIS":
             raise ValueError("READY_TO_ANSWER requires ANSWER_SYNTHESIS")
         if research_phase == "ANSWER_SYNTHESIS" and task_status != "READY_TO_ANSWER":
             raise ValueError("ANSWER_SYNTHESIS requires READY_TO_ANSWER")
+        if task_status == "READY_TO_ANSWER" and (
+            outcome != "RESOLVED" or boundary_basis != "TASK_COMPLETE" or next_subgoal
+        ):
+            raise ValueError(
+                "READY_TO_ANSWER requires RESOLVED, TASK_COMPLETE, and empty next_loop_subgoal"
+            )
         operations = delta.get("operations")
         if not isinstance(operations, list):
             raise ValueError("state_delta.operations must be a list")
