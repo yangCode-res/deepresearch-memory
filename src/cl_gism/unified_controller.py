@@ -34,6 +34,10 @@ VALID_SOURCE_TYPES = {"user", "agent", "tool", "paper", "web", "experiment", "sy
 INFORMATION_GAIN_LEVELS = {"HIGH", "MEDIUM", "LOW"}
 
 
+def _canonical_subgoal(value: Any) -> str:
+    return " ".join(str(value or "").casefold().split())
+
+
 def empty_loop_progress() -> dict[str, Any]:
     """Create ephemeral, current-loop-only progress state."""
 
@@ -50,18 +54,57 @@ def empty_loop_progress() -> dict[str, Any]:
         "expected_information_gain": "HIGH",
         "tried_strategies": [],
         "rejected_hypotheses": [],
+        "blocked_subgoals": [],
         "promising_leads": [],
         "prioritized_open_aspects": [],
-        "next_best_action": {
+        "research_direction": {
             "objective": "",
-            "recommended_tool": "",
-            "query_or_target": "",
+            "must_investigate": [],
             "rationale": "",
-            "expected_gain": "HIGH",
             "stop_condition": "",
         },
         "avoid": [],
     }
+
+
+def _loop_progress_output_contract() -> dict[str, Any]:
+    contract = empty_loop_progress()
+    contract.update(
+        {
+            "tried_strategies": [
+                {
+                    "strategy": "semantic strategy family",
+                    "outcome": "compact outcome",
+                    "evidence_gain": "HIGH|MEDIUM|LOW|NONE",
+                }
+            ],
+            "promising_leads": [
+                {
+                    "kind": "ENTITY|URL|RESULT",
+                    "entity": "concrete named entity, URL, or result ID",
+                    "source": "where this lead appeared",
+                    "reason": "why it matches task clues",
+                    "status": "ACTIVE|VERIFIED|REJECTED",
+                    "confidence": 0.8,
+                }
+            ],
+            "prioritized_open_aspects": [
+                {
+                    "aspect": "unresolved aspect",
+                    "priority": "ANSWER_CRITICAL|CORROBORATING",
+                    "status": "open|resolved",
+                    "best_next_action": "direction only, no tool or exact query",
+                }
+            ],
+            "research_direction": {
+                "objective": "current directional objective",
+                "must_investigate": ["concrete lead from promising_leads"],
+                "rationale": "why this direction has value",
+                "stop_condition": "observable condition for closing this direction",
+            },
+        }
+    )
+    return contract
 
 
 def _normalize_loop_progress(raw: Any, previous: dict[str, Any] | None) -> dict[str, Any]:
@@ -108,47 +151,77 @@ def _normalize_loop_progress(raw: Any, previous: dict[str, Any] | None) -> dict[
         normalized[name] = records
 
     compact_records("tried_strategies", ("strategy", "outcome", "evidence_gain"))
-    compact_records("promising_leads", ("entity", "source", "reason", "score"))
+    # Promising leads are sticky: a named entity, URL, or concrete result must
+    # not disappear just because a later controller response omits it. Generic
+    # suggestions such as "search for other brands" are directions, not leads.
+    prior_leads = prior.get("promising_leads") or []
+    incoming_leads = source.get("promising_leads") or []
+    merged_leads: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in [*prior_leads, *incoming_leads]:
+        if not isinstance(item, dict):
+            continue
+        kind = str(item.get("kind") or "").upper()
+        entity = str(item.get("entity") or "").strip()[:500]
+        source_ref = str(item.get("source") or "").strip()[:500]
+        status = str(item.get("status") or "ACTIVE").upper()
+        if kind not in {"ENTITY", "URL", "RESULT"} or not entity or not source_ref:
+            continue
+        if status not in {"ACTIVE", "VERIFIED", "REJECTED"}:
+            status = "ACTIVE"
+        try:
+            confidence = max(0.0, min(1.0, float(item.get("confidence", 0.5))))
+        except (TypeError, ValueError):
+            confidence = 0.5
+        record = {
+            "kind": kind,
+            "entity": entity,
+            "source": source_ref,
+            "reason": str(item.get("reason") or "")[:500],
+            "status": status,
+            "confidence": confidence,
+        }
+        key = (kind, entity.casefold())
+        previous_record = merged_leads.get(key)
+        if previous_record is None or confidence >= float(previous_record.get("confidence", 0.0)):
+            merged_leads[key] = record
+    normalized["promising_leads"] = list(merged_leads.values())[:8]
     compact_records(
         "prioritized_open_aspects",
         ("aspect", "priority", "status", "best_next_action"),
         count=12,
     )
-    for name in ("rejected_hypotheses", "avoid"):
+    for name in ("rejected_hypotheses", "blocked_subgoals", "avoid"):
         value = source.get(name)
         if isinstance(value, list):
-            normalized[name] = [str(item)[:500] for item in value if str(item).strip()][:12]
+            sticky = [str(item)[:500] for item in prior.get(name) or [] if str(item).strip()]
+            sticky.extend(str(item)[:500] for item in value if str(item).strip())
+            normalized[name] = list(dict.fromkeys(sticky))[:12]
 
-    action = source.get("next_best_action")
-    if isinstance(action, dict):
-        normalized_action = dict(prior.get("next_best_action") or {})
-        for name in (
-            "objective",
-            "recommended_tool",
-            "query_or_target",
-            "rationale",
-            "stop_condition",
-        ):
-            if name in action:
-                normalized_action[name] = str(action.get(name) or "")[:600]
-        action_gain = str(action.get("expected_gain") or "").upper()
-        if action_gain in INFORMATION_GAIN_LEVELS:
-            normalized_action["expected_gain"] = action_gain
-        normalized["next_best_action"] = normalized_action
+    direction = source.get("research_direction")
+    if isinstance(direction, dict):
+        normalized_direction = dict(prior.get("research_direction") or {})
+        for name in ("objective", "rationale", "stop_condition"):
+            if name in direction:
+                normalized_direction[name] = str(direction.get(name) or "")[:600]
+        must_investigate = direction.get("must_investigate")
+        if isinstance(must_investigate, list):
+            normalized_direction["must_investigate"] = [
+                str(item)[:500] for item in must_investigate if str(item).strip()
+            ][:5]
+        normalized["research_direction"] = normalized_direction
     return normalized
 
 
-def _ensure_action_guidance(
+def _ensure_research_direction(
     raw: dict[str, Any], *, stagnant_rounds: int
 ) -> None:
-    """Supply a safe concrete action contract if a controller omits one."""
+    """Supply directional guidance without taking tool choice from the researcher."""
 
     loop = raw.get("loop") if isinstance(raw.get("loop"), dict) else {}
     progress = loop.get("progress") if isinstance(loop.get("progress"), dict) else {}
-    retrieval = raw.get("retrieval") if isinstance(raw.get("retrieval"), dict) else {}
-    action = progress.get("next_best_action")
-    if not isinstance(action, dict):
-        action = {}
+    direction = progress.get("research_direction")
+    if not isinstance(direction, dict):
+        direction = {}
     status = str(raw.get("task_status") or "CONTINUE").upper()
     if status != "READY_TO_ANSWER":
         subgoal_value = (
@@ -157,22 +230,36 @@ def _ensure_action_guidance(
             else loop.get("current_loop_subgoal")
         )
         subgoal = str(subgoal_value or "").strip()
-        query = str(retrieval.get("query") or "").strip()
         defaults = {
             "objective": subgoal,
-            "recommended_tool": "search_or_open",
-            "query_or_target": query,
-            "rationale": str(retrieval.get("reason") or loop.get("reason") or ""),
-            "expected_gain": progress.get("expected_information_gain", "HIGH"),
+            "must_investigate": [],
+            "rationale": str(loop.get("reason") or ""),
             "stop_condition": str(
                 progress.get("completion_test")
                 or "obtain evidence that resolves the current subgoal"
             ),
         }
         for name, value in defaults.items():
-            if not str(action.get(name) or "").strip():
-                action[name] = value
-    progress["next_best_action"] = action
+            if name == "must_investigate":
+                if not isinstance(direction.get(name), list):
+                    direction[name] = value
+            elif not str(direction.get(name) or "").strip():
+                direction[name] = value
+        if not direction.get("must_investigate"):
+            active_leads = sorted(
+                (
+                    item
+                    for item in progress.get("promising_leads") or []
+                    if isinstance(item, dict) and item.get("status") == "ACTIVE"
+                ),
+                key=lambda item: float(item.get("confidence", 0.0)),
+                reverse=True,
+            )
+            direction["must_investigate"] = [
+                str(item.get("entity") or "") for item in active_leads[:3]
+                if str(item.get("entity") or "").strip()
+            ]
+    progress["research_direction"] = direction
     if stagnant_rounds >= 2 and not progress.get("avoid"):
         tried = progress.get("tried_strategies") or []
         latest_strategy = ""
@@ -285,10 +372,11 @@ class UnifiedMemoryController:
             "EVIDENCE_COMPLETION means the answer is stable and only source or citation coverage is missing; "
             "ANSWER_SYNTHESIS means research is complete and the next call must answer. "
             "Never solve the user's research question yourself and never invent memory IDs or evidence IDs. "
-            "The current-loop Working State is also an action policy, not merely a summary. Track failed "
+            "The current-loop Working State is a directional policy, not a tool planner. Track failed "
             "search strategies, rejected hypotheses, promising entities or URLs visible in tool results, "
-            "prioritized unresolved aspects, one concrete next-best action, and explicit actions to avoid. "
-            "Prefer opening or testing a promising lead over issuing another broad query. "
+            "prioritized unresolved aspects, a research objective, must-investigate leads, a stop condition, "
+            "and explicit directions to avoid. Never choose the research model's tool, URL target, exact "
+            "query, or query wording. The research model owns those concrete choices. "
             "Operation contract: ADD may target active_subgoals, confirmed_constraints, soft_preferences, "
             "candidate_options, rejected_options, working_hypotheses, resolved_findings, open_questions, "
             "uncertainties, or next_actions. UPDATE may target current_goal only. RESOLVE may target "
@@ -331,7 +419,7 @@ class UnifiedMemoryController:
                     "next_loop_subgoal": "short label",
                     "outcome": "IN_PROGRESS|RESOLVED|REFUTED|BLOCKED|SUPERSEDED",
                     "boundary_basis": "NONE|SUBGOAL_COMPLETED|SUBGOAL_CHANGED|CANDIDATE_CHANGED|BLOCKED_OR_SATURATED|PHASE_TRANSITION|TASK_COMPLETE",
-                    "progress": empty_loop_progress(),
+                    "progress": _loop_progress_output_contract(),
                 },
                 "state_delta": {
                     "mode": "APPLY|NOOP",
@@ -367,15 +455,16 @@ class UnifiedMemoryController:
                 "committed_current_loop_subgoal is authoritative. Treat it as the current work-unit contract; only loop.next_loop_subgoal may propose the next commitment.",
                 "Update loop.progress every round. It is ephemeral working memory for the current loop, not Global State. Preserve previously verified aspects and citation-bearing key evidence unless new evidence refutes them.",
                 "Maintain tried_strategies as semantic strategy families, not a raw query log. Mark evidence_gain as HIGH, MEDIUM, LOW, or NONE and record the outcome compactly.",
-                "Extract promising_leads from the latest tool result even when the research model ignored them. Each lead must say why it matches the task clues; prefer a named entity, URL, or result identifier that can be opened or tested next.",
+                "Extract promising_leads from the latest tool result even when the research model ignored them. A lead must have kind ENTITY, URL, or RESULT; a concrete entity; a source/result reference; status ACTIVE, VERIFIED, or REJECTED; confidence; and why it matches. Never store an instruction such as 'search for X' as a lead.",
                 "Maintain rejected_hypotheses and avoid so the next model call does not revisit disproven regions, candidates, or semantically equivalent failed queries unless genuinely new evidence justifies it.",
+                "Maintain blocked_subgoals. A subgoal closed as BLOCKED must not be selected again unless new evidence explicitly reopens it.",
                 "prioritized_open_aspects must distinguish ANSWER_CRITICAL from CORROBORATING aspects and give the best next action for important unresolved aspects.",
-                "For CONTINUE or SWITCH_LOOP, next_best_action must recommend one concrete, executable research action: an objective, tool or method, query or target, rationale, expected gain, and observable stop condition. Do not use vague instructions such as continue researching.",
+                "For CONTINUE or SWITCH_LOOP, research_direction must give the objective, up to five must-investigate concrete leads, rationale, and observable stop condition. It must not contain a recommended tool, URL target, exact search query, or query wording.",
                 "completion_test states what observable result closes this work unit. resolved_aspects and open_aspects form a compact coverage ledger; key_evidence stores only decisive citation-bearing facts, not search narration.",
                 "Set answer_stable=true only when remaining open aspects cannot reasonably change candidate_answer. Set evidence_sufficient=true when core success criteria have citable support; corroborating clues may retain disclosed uncertainty.",
                 "expected_information_gain estimates whether another search under the same subgoal is likely to change the answer or materially improve core evidence.",
                 "Use loop_runtime to detect unproductive repetition. Several rounds without material ledger changes require either a genuinely different strategy/subgoal, a BLOCKED outcome, or READY_TO_ANSWER when the answer is already stable.",
-                "When rounds_without_material_progress >= 2, the next action must not be semantically equivalent to a failed strategy. When it is >= 3, explicitly change strategy, pursue the strongest promising lead, switch subgoal, or answer; add the repeated approach to avoid.",
+                "When rounds_without_material_progress >= 2, prohibit the failed semantic strategy while leaving the concrete alternative to the research model. When it is >= 3, require investigation of the strongest active lead, switch subgoal, or answer; add the repeated approach to avoid.",
                 "Return READY_TO_ANSWER when the answer is stable, the task's core success criteria have adequate citable support, unresolved details cannot reasonably change the exact answer, and further search has low expected information gain.",
                 "Do not require equal-strength direct citations for every clue: distinguish identity-critical claims from corroborating clues and disclose residual uncertainty in the final answer.",
                 "Return SWITCH_LOOP when the completed/current work unit is terminal and the next call will pursue a different primary subgoal or completion test. The research phase may stay the same.",
@@ -422,8 +511,38 @@ class UnifiedMemoryController:
                 raw["loop"]["progress"] = _normalize_loop_progress(
                     raw["loop"].get("progress"), loop_progress
                 )
-            _ensure_action_guidance(raw, stagnant_rounds=stagnant_rounds)
+            _ensure_research_direction(raw, stagnant_rounds=stagnant_rounds)
+            retrieval_output = raw.get("retrieval")
+            if isinstance(retrieval_output, dict) and isinstance(
+                retrieval_output.get("selected_memory_ids"), list
+            ):
+                # Memory retrieval is advisory. An otherwise valid control
+                # decision must not be discarded because the LLM echoed a
+                # stale or invented memory ID; keep only IDs from this round's
+                # candidate pool.
+                retrieval_output["selected_memory_ids"] = [
+                    str(item)
+                    for item in retrieval_output["selected_memory_ids"]
+                    if str(item) in allowed_ids
+                ][: self.max_selected_memories]
             try:
+                loop_output = raw.get("loop") if isinstance(raw.get("loop"), dict) else {}
+                progress_output = (
+                    loop_output.get("progress")
+                    if isinstance(loop_output.get("progress"), dict)
+                    else {}
+                )
+                blocked_subgoals = {
+                    _canonical_subgoal(item)
+                    for item in progress_output.get("blocked_subgoals") or []
+                    if _canonical_subgoal(item)
+                }
+                next_subgoal = _canonical_subgoal(loop_output.get("next_loop_subgoal"))
+                if (
+                    str(raw.get("task_status") or "").upper() == "SWITCH_LOOP"
+                    and next_subgoal in blocked_subgoals
+                ):
+                    raise ValueError("next_loop_subgoal reopens a blocked subgoal without new evidence")
                 self._validate_contract(raw, state, allowed_ids, current_phase)
                 break
             except ValueError as exc:
@@ -528,13 +647,13 @@ class UnifiedMemoryController:
                 "READY_TO_ANSWER requires stable answer, sufficient evidence, and LOW information gain"
             )
         if task_status != "READY_TO_ANSWER":
-            action = progress.get("next_best_action")
-            if not isinstance(action, dict):
-                raise ValueError("loop.progress.next_best_action must be an object")
-            required_action_fields = ("objective", "recommended_tool", "query_or_target", "stop_condition")
-            if any(not str(action.get(name) or "").strip() for name in required_action_fields):
+            direction = progress.get("research_direction")
+            if not isinstance(direction, dict):
+                raise ValueError("loop.progress.research_direction must be an object")
+            required_direction_fields = ("objective", "stop_condition")
+            if any(not str(direction.get(name) or "").strip() for name in required_direction_fields):
                 raise ValueError(
-                    "next_best_action requires objective, recommended_tool, query_or_target, and stop_condition"
+                    "research_direction requires objective and stop_condition"
                 )
         operations = delta.get("operations")
         if not isinstance(operations, list):

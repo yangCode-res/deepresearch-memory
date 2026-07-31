@@ -318,12 +318,21 @@ class OnlineMemorySession:
                         for name in (
                             "tried_strategies",
                             "rejected_hypotheses",
+                            "blocked_subgoals",
                             "promising_leads",
                             "prioritized_open_aspects",
-                            "next_best_action",
+                            "research_direction",
                             "avoid",
                         ):
                             handoff[name] = control.loop_progress.get(name, handoff[name])
+                        if control.loop_outcome == "BLOCKED":
+                            blocked = [
+                                *handoff.get("blocked_subgoals", []),
+                                control.current_loop_subgoal,
+                            ]
+                            handoff["blocked_subgoals"] = list(
+                                dict.fromkeys(item for item in blocked if str(item).strip())
+                            )[:12]
                         self._loop_progress = handoff
                         self._loop_rounds = 0
                         self._stagnant_rounds = 0
@@ -378,14 +387,21 @@ class OnlineMemorySession:
     def _progress_signature(progress: dict[str, Any]) -> str:
         durable = {
             "resolved_aspects": progress.get("resolved_aspects") or [],
-            "open_aspects": progress.get("open_aspects") or [],
             "key_evidence": progress.get("key_evidence") or [],
             "candidate_answer": progress.get("candidate_answer") or "",
             "answer_stable": bool(progress.get("answer_stable")),
             "evidence_sufficient": bool(progress.get("evidence_sufficient")),
             # Discovering a lead or disproving a hypothesis is material
             # progress even before it becomes citation-bearing evidence.
-            "promising_leads": progress.get("promising_leads") or [],
+            "promising_leads": sorted(
+                (
+                    str(item.get("kind") or ""),
+                    str(item.get("entity") or "").casefold(),
+                    str(item.get("status") or "ACTIVE"),
+                )
+                for item in progress.get("promising_leads") or []
+                if isinstance(item, dict)
+            ),
             "rejected_hypotheses": progress.get("rejected_hypotheses") or [],
         }
         return json.dumps(durable, ensure_ascii=False, sort_keys=True)
@@ -400,20 +416,23 @@ class OnlineMemorySession:
                 "citations already present in the current loop or evidence memories."
             )
         progress = self._loop_progress
-        action = progress.get("next_best_action") or {}
+        direction = progress.get("research_direction") or {}
         lines = [
-            "Use the Working State as an action contract for the next research step.",
+            "Use the Working State as a directional contract for the next research step.",
         ]
-        if action.get("objective"):
-            lines.append(f"Objective: {action['objective']}")
-        tool = str(action.get("recommended_tool") or "").strip()
-        target = str(action.get("query_or_target") or "").strip()
-        if tool or target:
-            lines.append(f"Next action: {tool or 'research'} {target}".strip())
-        if action.get("rationale"):
-            lines.append(f"Why: {action['rationale']}")
-        if action.get("stop_condition"):
-            lines.append(f"Stop this action when: {action['stop_condition']}")
+        if direction.get("objective"):
+            lines.append(f"Research objective: {direction['objective']}")
+        must_investigate = [
+            str(item).strip()
+            for item in direction.get("must_investigate") or []
+            if str(item).strip()
+        ]
+        if must_investigate:
+            lines.append("Must investigate before broad exploration: " + "; ".join(must_investigate))
+        if direction.get("rationale"):
+            lines.append(f"Why this direction matters: {direction['rationale']}")
+        if direction.get("stop_condition"):
+            lines.append(f"Stop this research direction when: {direction['stop_condition']}")
         leads = progress.get("promising_leads") or []
         if leads:
             lead_names = [
@@ -431,6 +450,11 @@ class OnlineMemorySession:
             if str(item).strip()
         ]
         exclusions = [*avoid, *[f"rejected hypothesis: {item}" for item in rejected]]
+        exclusions.extend(
+            f"blocked subgoal: {item}"
+            for item in progress.get("blocked_subgoals") or []
+            if str(item).strip()
+        )
         if exclusions:
             lines.append("Do not repeat: " + "; ".join(exclusions[:8]))
         if self._stagnant_rounds >= 2:
@@ -439,8 +463,10 @@ class OnlineMemorySession:
                 "material ledger change. Do not issue a semantically equivalent reformulation of a "
                 "failed query; exploit a promising result or change strategy."
             )
-        if len(lines) == 1:
-            lines.append("Continue the current semantic subgoal with the highest-information action.")
+        lines.append(
+            "You own the concrete research action: choose the browser tool, source, URL, and exact "
+            "query yourself. The memory controller supplies direction and constraints only."
+        )
         return "\n".join(lines)
 
     def _memory_block(self, query: str, hits: list[MemoryHit]) -> str:

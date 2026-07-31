@@ -364,10 +364,12 @@ class UnifiedControllerTests(unittest.TestCase):
                         "rejected_hypotheses": ["Finland"],
                         "promising_leads": [
                             {
+                                "kind": "ENTITY",
                                 "entity": "Vitali Hakko",
                                 "source": "result 3",
                                 "reason": "matches the hat and scarf clues",
-                                "score": "0.87",
+                                "status": "ACTIVE",
+                                "confidence": 0.87,
                             }
                         ],
                         "prioritized_open_aspects": [
@@ -378,12 +380,10 @@ class UnifiedControllerTests(unittest.TestCase):
                                 "best_next_action": "open result 3",
                             }
                         ],
-                        "next_best_action": {
+                        "research_direction": {
                             "objective": "verify Vitali Hakko",
-                            "recommended_tool": "open",
-                            "query_or_target": "result 3",
+                            "must_investigate": [],
                             "rationale": "the result matches multiple clues",
-                            "expected_gain": "HIGH",
                             "stop_condition": "confirm the child-created youth brand",
                         },
                         "avoid": ["more Finland tower queries"],
@@ -441,8 +441,8 @@ class UnifiedControllerTests(unittest.TestCase):
             "Vitali Hakko",
         )
         self.assertEqual(
-            second.loop_progress["next_best_action"]["query_or_target"],
-            "result 3",
+            second.loop_progress["research_direction"]["must_investigate"],
+            ["Vitali Hakko"],
         )
         self.assertEqual(client.inputs[1]["loop_runtime"]["rounds_in_current_loop"], 40)
 

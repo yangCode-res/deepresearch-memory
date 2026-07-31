@@ -40,8 +40,10 @@ PYTHONPATH=src python examples/run_mvp.py
 
 ## OpenResearcher 在线 API Controller
 
-在线实验将研究面与控制面分开：OpenResearcher-30B-A3B 只负责研究和工具调用，外部 API
-模型每轮用一次结构化调用同时决定 Loop 边界、StateDelta 与进入下一轮的 Memory IDs。
+在线实验将研究面与控制面分开：OpenResearcher-30B-A3B 负责具体研究动作、工具选择和查询措辞；
+外部 API 模型每轮用一次结构化调用决定 Loop 边界、StateDelta、Memory IDs，以及方向性的
+Working State（当前目标、必须调查的线索、禁止方向和停止条件）。控制器不会替
+OpenResearcher 指定具体的 `search/open/find` 或搜索词。
 
 服务器凭证必须放在仓库外的权限文件中。可参考 `configs/controller.env.example`，默认位置为：
 

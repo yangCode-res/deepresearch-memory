@@ -44,6 +44,52 @@ class FakeController:
 
 
 class OnlineMemoryTests(unittest.TestCase):
+    def test_material_progress_ignores_narrative_lead_churn(self):
+        first = {
+            "open_aspects": ["identify the youth brand"],
+            "resolved_aspects": [],
+            "key_evidence": [],
+            "promising_leads": [{
+                "kind": "ENTITY",
+                "entity": "Vitali Hakko",
+                "source": "result 3",
+                "reason": "matches the hat clue",
+                "status": "ACTIVE",
+                "confidence": 0.8,
+            }],
+        }
+        rewritten = {
+            **first,
+            "open_aspects": ["find the exact brand name"],
+            "promising_leads": [{
+                **first["promising_leads"][0],
+                "source": "result 7",
+                "reason": "different narrative wording",
+                "confidence": 0.9,
+            }],
+        }
+        genuinely_new = {
+            **rewritten,
+            "promising_leads": [
+                *rewritten["promising_leads"],
+                {
+                    "kind": "ENTITY",
+                    "entity": "Cem Hakko",
+                    "source": "result 8",
+                    "status": "ACTIVE",
+                },
+            ],
+        }
+
+        self.assertEqual(
+            OnlineMemorySession._progress_signature(first),
+            OnlineMemorySession._progress_signature(rewritten),
+        )
+        self.assertNotEqual(
+            OnlineMemorySession._progress_signature(rewritten),
+            OnlineMemorySession._progress_signature(genuinely_new),
+        )
+
     def test_cross_loop_prompt_keeps_current_loop_and_retrieves_old_loop(self):
         controller = FakeController()
         session = OnlineMemorySession(
@@ -188,10 +234,12 @@ class OnlineMemoryTests(unittest.TestCase):
                         }],
                         "rejected_hypotheses": ["network bottleneck"],
                         "promising_leads": [{
+                            "kind": "ENTITY",
                             "entity": "database latency",
                             "source": "dependency trace",
                             "reason": "the remaining slow component",
-                            "score": "0.9",
+                            "status": "ACTIVE",
+                            "confidence": 0.9,
                         }],
                         "prioritized_open_aspects": [{
                             "aspect": "database latency",
@@ -199,12 +247,10 @@ class OnlineMemoryTests(unittest.TestCase):
                             "status": "open",
                             "best_next_action": "inspect database trace",
                         }],
-                        "next_best_action": {
+                        "research_direction": {
                             "objective": "diagnose database latency",
-                            "recommended_tool": "open",
-                            "query_or_target": "database dependency trace",
+                            "must_investigate": ["database dependency trace"],
                             "rationale": "network has been ruled out",
-                            "expected_gain": "HIGH",
                             "stop_condition": "identify or rule out the database bottleneck",
                         },
                         "avoid": ["repeat network measurements"],
@@ -252,9 +298,10 @@ class OnlineMemoryTests(unittest.TestCase):
         self.assertEqual(session.traces[-1].current_loop_subgoal, "diagnose database latency")
         self.assertEqual(session.traces[-1].research_phase, "CANDIDATE_VERIFICATION")
         instruction = session._research_instruction()
-        self.assertIn("Next action: open database dependency trace", instruction)
+        self.assertIn("Must investigate before broad exploration: database dependency trace", instruction)
         self.assertIn("database latency", instruction)
         self.assertIn("Do not repeat: repeat network measurements", instruction)
+        self.assertIn("choose the browser tool", instruction)
 
     def test_invalid_controller_delta_archives_with_noop_instead_of_polluting_state(self):
         class SwitchingController:
