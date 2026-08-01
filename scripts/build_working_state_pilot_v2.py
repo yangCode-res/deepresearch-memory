@@ -79,7 +79,6 @@ UPDATE_KEYS = {
     "candidate_answer",
     "active_hypotheses",
     "failed_strategies",
-    "next_direction",
     "evidence_gaps",
     "answer_stable",
     "evidence_sufficient",
@@ -111,16 +110,26 @@ def validate_boundary(
         raise ValueError("invalid boundary action")
     current = str(raw["current_subgoal"] or "").strip()
     completion = str(raw["current_completion_test"] or "").strip()
-    if not current or not completion:
-        raise ValueError("current subgoal and completion test are required")
-    if first_step and action == "SWITCH_LOOP":
-        raise ValueError("the first decision point cannot SWITCH before a Loop contract is committed")
-    if committed_subgoal and current != committed_subgoal:
-        raise ValueError("current_subgoal must copy the committed value exactly")
-    if committed_completion_test and completion != committed_completion_test:
-        raise ValueError("current_completion_test must copy the committed value exactly")
     next_subgoal = str(raw["next_subgoal"] or "").strip()
     next_test = str(raw["next_completion_test"] or "").strip()
+    # These are system-owned fields. Do not spend repair calls asking the
+    # teacher to reproduce them byte-for-byte.
+    if committed_subgoal:
+        current = committed_subgoal
+    if committed_completion_test:
+        completion = committed_completion_test
+    # Before a contract exists, models sometimes describe initialization as a
+    # switch from the generic bootstrap state. Normalize that mechanically.
+    if first_step and action == "SWITCH_LOOP":
+        current = next_subgoal or current
+        completion = next_test or completion
+        action = "CONTINUE_CURRENT_LOOP"
+        next_subgoal = ""
+        next_test = ""
+        raw["outcome"] = "IN_PROGRESS"
+        raw["boundary_basis"] = "NONE"
+    if not current or not completion:
+        raise ValueError("current subgoal and completion test are required")
     policy_text = "\n".join([current, completion, next_subgoal, next_test])
     if CONCRETE_ACTION_PATTERN.search(policy_text):
         raise ValueError(
@@ -165,10 +174,11 @@ def call_and_repair(
     system_prompt: str,
     payload: dict[str, Any],
     validator: Any,
+    max_attempts: int = 2,
 ) -> dict[str, Any]:
     raw: dict[str, Any] = {}
     error = ""
-    for attempt in range(3):
+    for attempt in range(max_attempts):
         prompt_payload = payload if not attempt else {
             "validation_error": error,
             "invalid_response": raw,
@@ -197,7 +207,6 @@ def judge_boundary(
     committed_test = "" if first_step else str(working_state["completion_test"])
     payload = {
         "question": question,
-        "global_intent_state": global_state,
         "committed_loop_contract": {
             "current_subgoal": committed_subgoal,
             "completion_test": committed_test,
@@ -231,7 +240,6 @@ def semantic_contract(action: str, loop_number: int) -> dict[str, Any]:
             "candidate_answer": "",
             "active_hypotheses": [],
             "failed_strategies": [],
-            "next_direction": "information objective plus observable stop condition",
             "evidence_gaps": [],
             "answer_stable": action == "READY_TO_ANSWER",
             "evidence_sufficient": action == "READY_TO_ANSWER",
@@ -257,7 +265,6 @@ def semantic_contract(action: str, loop_number: int) -> dict[str, Any]:
         },
         "next_loop_setup": (
             {
-                "next_direction": "information objective plus stop condition",
                 "evidence_gaps": [],
             }
             if action == "SWITCH_LOOP"
@@ -283,6 +290,23 @@ def build_target(
     if not isinstance(update, dict) or set(update) != UPDATE_KEYS:
         raise ValueError("working_state_update has missing or extra fields")
     action = boundary["action"]
+    # The controller's directional policy is deterministic from the validated
+    # work-unit contract. This avoids a second model restating it as a tool
+    # action and then consuming repair tokens.
+    update["next_direction"] = (
+        f"Objective: {boundary['current_subgoal']}. "
+        f"Stop when: {boundary['current_completion_test']}."
+    )
+    for name in ("open_aspects", "evidence_gaps"):
+        values = update.get(name) if isinstance(update.get(name), list) else []
+        update[name] = [
+            str(item) for item in values
+            if str(item).strip() and not CONCRETE_ACTION_PATTERN.search(str(item))
+        ][:8]
+    if not update["evidence_sufficient"] and not (update["open_aspects"] or update["evidence_gaps"]):
+        update["evidence_gaps"] = [
+            f"Evidence has not yet satisfied: {boundary['current_completion_test']}"
+        ]
     current = deepcopy(working_before)
     current.update(update)
     current.update(
@@ -318,7 +342,10 @@ def build_target(
                     "completion_test": boundary["next_completion_test"],
                     "progress_summary": "New loop initialized from the previous loop handoff.",
                     "open_aspects": list(setup.get("evidence_gaps") or [boundary["next_subgoal"]])[:8],
-                    "next_direction": str(setup.get("next_direction") or ""),
+                    "next_direction": (
+                        f"Objective: {boundary['next_subgoal']}. "
+                        f"Stop when: {boundary['next_completion_test']}."
+                    ),
                     "evidence_gaps": list(setup.get("evidence_gaps") or [])[:8],
                 }
             )
@@ -377,7 +404,6 @@ def write_semantic_state(
         allowed_memory_ids.add(f"memory_loop_{loop_number:03d}")
     payload = {
         "question": question,
-        "global_intent_state_before": global_state,
         "working_state_before": working_state,
         "observed_messages": observed_messages,
         "current_loop_evidence_ids": sorted(seen_message_ids),
@@ -399,6 +425,20 @@ def write_semantic_state(
             allowed_memory_ids=allowed_memory_ids,
         ),
     )
+
+
+def compact_observed_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Bound duplicated context sent to the two teacher stages."""
+
+    compacted: list[dict[str, Any]] = []
+    for message in messages:
+        item = dict(message)
+        limit = 5000 if item.get("role") == "tool" else 1600
+        text = str(item.get("text") or "")
+        item["text"] = text[:limit]
+        item["truncated"] = bool(item.get("truncated")) or len(text) > limit
+        compacted.append(item)
+    return compacted
 
 
 def parse_args() -> argparse.Namespace:
@@ -463,7 +503,8 @@ def main() -> None:
             first_step = True
             for step in steps:
                 processed += 1
-                seen_ids.update(message["message_id"] for message in step["observed_messages"])
+                observed_messages = compact_observed_messages(step["observed_messages"])
+                seen_ids.update(message["message_id"] for message in observed_messages)
                 try:
                     boundary = judge_boundary(
                         client,
@@ -471,7 +512,7 @@ def main() -> None:
                         global_state=global_state,
                         working_state=working_state,
                         prior_memories=memories,
-                        observed_messages=step["observed_messages"],
+                        observed_messages=observed_messages,
                         first_step=first_step,
                     )
                     target = write_semantic_state(
@@ -480,7 +521,7 @@ def main() -> None:
                         global_state=global_state,
                         working_state=working_state,
                         prior_memories=memories,
-                        observed_messages=step["observed_messages"],
+                        observed_messages=observed_messages,
                         boundary=boundary,
                         loop_number=loop_number,
                         seen_message_ids=seen_ids,
@@ -504,7 +545,7 @@ def main() -> None:
                             "question": question,
                             "global_intent_state_before": deepcopy(global_state),
                             "working_state_before": deepcopy(working_state),
-                            "observed_messages": step["observed_messages"],
+                            "observed_messages": observed_messages,
                             "current_loop_evidence_ids": sorted(seen_ids),
                             "available_cross_loop_memories": deepcopy(memories[-8:]),
                         },
@@ -539,6 +580,10 @@ def main() -> None:
         "processed_decision_points": processed,
         "errors": len(errors),
         "model": args.model,
+        "api_requests": client.request_count,
+        "prompt_tokens": client.total_prompt_tokens,
+        "completion_tokens": client.total_completion_tokens,
+        "total_tokens": client.total_tokens,
         "output": str(args.output),
         "preview": str(preview),
         "error_examples": errors[:20],

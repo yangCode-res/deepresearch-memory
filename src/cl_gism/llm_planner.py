@@ -93,6 +93,10 @@ class OpenAIChatJSONClient:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_tokens = max_tokens
+        self.request_count = 0
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_tokens = 0
 
     @classmethod
     def from_env(cls, *, model: str | None = None, base_url: str | None = None) -> "OpenAIChatJSONClient" | None:
@@ -143,6 +147,14 @@ class OpenAIChatJSONClient:
                 time.sleep(0.5 * (2**attempt))
 
         data = json.loads(body)
+        self.request_count += 1
+        usage = data.get("usage") or {}
+        prompt_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
+        completion_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
+        total_tokens = int(usage.get("total_tokens") or prompt_tokens + completion_tokens)
+        self.total_prompt_tokens += prompt_tokens
+        self.total_completion_tokens += completion_tokens
+        self.total_tokens += total_tokens
         choices = data.get("choices") or []
         if not choices:
             raise RuntimeError("OpenAI response did not contain any choices")

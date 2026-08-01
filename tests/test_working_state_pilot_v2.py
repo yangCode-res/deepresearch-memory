@@ -36,13 +36,13 @@ class WorkingStatePilotV2Test(unittest.TestCase):
         )
         self.assertEqual(validated["action"], "CONTINUE_CURRENT_LOOP")
         raw["current_subgoal"] = "verify release date"
-        with self.assertRaisesRegex(ValueError, "copy the committed"):
-            MODULE.validate_boundary(
-                raw,
-                committed_subgoal="verify identity",
-                committed_completion_test="identity has direct support",
-                first_step=False,
-            )
+        normalized = MODULE.validate_boundary(
+            raw,
+            committed_subgoal="verify identity",
+            committed_completion_test="identity has direct support",
+            first_step=False,
+        )
+        self.assertEqual(normalized["current_subgoal"], "verify identity")
 
     def test_switch_requires_distinct_next_contract(self):
         raw = MODULE.boundary_contract()
