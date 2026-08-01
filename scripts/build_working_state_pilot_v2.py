@@ -21,6 +21,7 @@ for path in (str(ROOT / "src"), str(SCRIPT_DIR)):
 from cl_gism.llm_planner import OpenAIChatJSONClient  # noqa: E402
 from build_working_state_dataset import (  # noqa: E402
     ACTIONS,
+    CONCRETE_ACTION_PATTERN,
     DELTA_FIELDS,
     GAIN_LEVELS,
     apply_delta,
@@ -43,8 +44,10 @@ or the next call must pursue an independently decidable dependency. READY only w
 core claims have citable support, and another search has low expected information gain.
 
 The committed subgoal is system-owned: copy it exactly when supplied. Never silently rename it under CONTINUE.
-On the first step, establish a narrow immediate subgoal, not the whole user question. A SWITCH requires a
-genuinely different next subgoal and completion test."""
+Subgoals and completion tests describe information to establish, never an exact search/open/view action,
+named website, URL, or tool. On the first step, establish a narrow immediate subgoal, not the whole user
+question; the first action must be CONTINUE unless the available evidence already supports READY. A SWITCH
+requires a genuinely different next subgoal and completion test."""
 
 
 STATE_SYSTEM_PROMPT = """You write semantic state content after a separate judge has fixed the Loop action.
@@ -99,7 +102,7 @@ def boundary_contract() -> dict[str, Any]:
 
 
 def validate_boundary(
-    raw: dict[str, Any], *, committed_subgoal: str, committed_completion_test: str
+    raw: dict[str, Any], *, committed_subgoal: str, committed_completion_test: str, first_step: bool
 ) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != BOUNDARY_KEYS:
         raise ValueError("boundary response has missing or extra fields")
@@ -110,12 +113,20 @@ def validate_boundary(
     completion = str(raw["current_completion_test"] or "").strip()
     if not current or not completion:
         raise ValueError("current subgoal and completion test are required")
+    if first_step and action == "SWITCH_LOOP":
+        raise ValueError("the first decision point cannot SWITCH before a Loop contract is committed")
     if committed_subgoal and current != committed_subgoal:
         raise ValueError("current_subgoal must copy the committed value exactly")
     if committed_completion_test and completion != committed_completion_test:
         raise ValueError("current_completion_test must copy the committed value exactly")
     next_subgoal = str(raw["next_subgoal"] or "").strip()
     next_test = str(raw["next_completion_test"] or "").strip()
+    policy_text = "\n".join([current, completion, next_subgoal, next_test])
+    if CONCRETE_ACTION_PATTERN.search(policy_text):
+        raise ValueError(
+            "subgoals and completion tests must describe information outcomes, not concrete actions, "
+            "named websites, URLs, or tools"
+        )
     outcome = str(raw["outcome"] or "").upper()
     basis = str(raw["boundary_basis"] or "").upper()
     if action == "CONTINUE_CURRENT_LOOP" and (
@@ -204,6 +215,7 @@ def judge_boundary(
             raw,
             committed_subgoal=committed_subgoal,
             committed_completion_test=committed_test,
+            first_step=first_step,
         ),
     )
 

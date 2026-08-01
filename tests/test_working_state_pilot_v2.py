@@ -32,6 +32,7 @@ class WorkingStatePilotV2Test(unittest.TestCase):
             raw,
             committed_subgoal="verify identity",
             committed_completion_test="identity has direct support",
+            first_step=False,
         )
         self.assertEqual(validated["action"], "CONTINUE_CURRENT_LOOP")
         raw["current_subgoal"] = "verify release date"
@@ -40,6 +41,7 @@ class WorkingStatePilotV2Test(unittest.TestCase):
                 raw,
                 committed_subgoal="verify identity",
                 committed_completion_test="identity has direct support",
+                first_step=False,
             )
 
     def test_switch_requires_distinct_next_contract(self):
@@ -61,6 +63,7 @@ class WorkingStatePilotV2Test(unittest.TestCase):
             raw,
             committed_subgoal="verify identity",
             committed_completion_test="identity has direct support",
+            first_step=False,
         )
         self.assertEqual(validated["next_subgoal"], "verify release date")
 
