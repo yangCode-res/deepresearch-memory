@@ -16,26 +16,31 @@ MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def loop(
+def decision(
+    index: int,
     number: int,
-    start: int,
-    end: int,
     action: str,
     *,
     subgoal: str,
-    outcome: str = "RESOLVED",
-    basis: str = "SUBGOAL_COMPLETED",
+    outcome: str | None = None,
+    basis: str | None = None,
 ):
+    if outcome is None:
+        outcome = "IN_PROGRESS" if action == "CONTINUE_CURRENT_LOOP" else "RESOLVED"
+    if basis is None:
+        basis = "NONE" if action == "CONTINUE_CURRENT_LOOP" else (
+            "TASK_COMPLETE" if action == "READY_TO_ANSWER" else "SUBGOAL_COMPLETED"
+        )
     return {
+        "decision_index": index,
         "loop_number": number,
-        "start_decision_index": start,
-        "end_decision_index": end,
-        "subgoal": subgoal,
+        "current_subgoal": subgoal,
         "completion_test": f"Evidence establishes whether to {subgoal.lower()}",
-        "end_action": action,
+        "action": action,
         "outcome": outcome,
         "boundary_basis": basis,
         "boundary_reason": "The evidence objective has reached its retrospective boundary.",
+        "causal_evidence_ids": [f"msg_{6 + index * 3:04d}"],
     }
 
 
@@ -57,19 +62,25 @@ class RetrospectiveBuilderTest(unittest.TestCase):
     def test_segmentation_maps_ranges_to_actions_and_allows_early_ready(self):
         raw = {
             "trajectory_summary": "identify candidate, verify date, then answer",
-            "loops": [
-                loop(1, 0, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
-                loop(
-                    2,
-                    2,
+            "decisions": [
+                decision(0, 1, "CONTINUE_CURRENT_LOOP", subgoal="Identify the target work"),
+                decision(1, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
+                decision(2, 2, "CONTINUE_CURRENT_LOOP", subgoal="Establish the requested date"),
+                decision(
                     3,
+                    2,
                     "READY_TO_ANSWER",
                     subgoal="Establish the requested date",
-                    basis="TASK_COMPLETE",
                 ),
             ],
         }
-        segmented = MODULE.validate_segmentation(raw, decision_count=6)
+        segmented = MODULE.validate_segmentation(
+            raw,
+            decision_count=6,
+            decision_message_limits=[6, 9, 12, 15, 18, 21],
+        )
+        self.assertEqual(len(segmented["loops"]), 2)
+        self.assertEqual(segmented["loops"][0]["end_decision_index"], 1)
         self.assertEqual(
             MODULE.boundary_for_decision(segmented, 0)["action"],
             "CONTINUE_CURRENT_LOOP",
@@ -85,38 +96,59 @@ class RetrospectiveBuilderTest(unittest.TestCase):
     def test_segmentation_rejects_gap(self):
         raw = {
             "trajectory_summary": "two stages",
-            "loops": [
-                loop(1, 0, 0, "SWITCH_LOOP", subgoal="Identify the target work"),
-                loop(
-                    2,
+            "decisions": [
+                decision(0, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
+                decision(
                     2,
                     2,
                     "READY_TO_ANSWER",
                     subgoal="Establish the requested date",
-                    basis="TASK_COMPLETE",
                 ),
             ],
         }
-        with self.assertRaisesRegex(ValueError, "contiguously"):
+        with self.assertRaisesRegex(ValueError, "consecutive"):
             MODULE.validate_segmentation(raw, decision_count=3)
 
     def test_incomplete_segmentation_must_cover_all_decisions(self):
         raw = {
             "trajectory_summary": "unfinished research",
-            "loops": [
-                loop(
-                    1,
+            "decisions": [
+                decision(
                     0,
                     1,
                     "CONTINUE_CURRENT_LOOP",
                     subgoal="Establish the requested date",
-                    outcome="IN_PROGRESS",
-                    basis="NONE",
+                ),
+                decision(
+                    1,
+                    1,
+                    "CONTINUE_CURRENT_LOOP",
+                    subgoal="Establish the requested date",
+                ),
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "early READY"):
+            MODULE.validate_segmentation(raw, decision_count=3)
+
+    def test_segmentation_rejects_future_evidence_coordinate(self):
+        raw = {
+            "trajectory_summary": "one decision",
+            "decisions": [
+                decision(
+                    0,
+                    1,
+                    "READY_TO_ANSWER",
+                    subgoal="Establish the requested date",
                 )
             ],
         }
-        with self.assertRaisesRegex(ValueError, "cover every"):
-            MODULE.validate_segmentation(raw, decision_count=3)
+        raw["decisions"][0]["causal_evidence_ids"] = ["msg_0009"]
+        with self.assertRaisesRegex(ValueError, "after its causal prefix"):
+            MODULE.validate_segmentation(
+                raw,
+                decision_count=1,
+                decision_message_limits=[6],
+            )
 
     def test_causal_payload_hides_next_loop_contract(self):
         boundary = {
