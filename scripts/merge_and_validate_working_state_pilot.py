@@ -21,14 +21,22 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", action="append", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--exclude-source", action="append", default=[])
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    excluded = set(args.exclude_source)
     rows: list[dict[str, Any]] = []
     for path in args.input:
-        rows.extend(json.loads(line) for line in path.open(encoding="utf-8") if line.strip())
+        for line in path.open(encoding="utf-8"):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            source_key = f"{row['source']['qid']}:{row['source']['step_index']}"
+            if source_key not in excluded:
+                rows.append(row)
 
     violations: list[dict[str, Any]] = []
     action_counts: dict[str, int] = {}
@@ -84,6 +92,7 @@ def main() -> None:
         "subgoal_drift_under_continue": subgoal_drift,
         "violations": violations,
         "valid": not violations,
+        "manually_excluded_sources": sorted(excluded),
     }
     args.output.with_suffix(".qa.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"

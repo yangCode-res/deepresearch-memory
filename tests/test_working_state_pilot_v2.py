@@ -67,6 +67,29 @@ class WorkingStatePilotV2Test(unittest.TestCase):
         )
         self.assertEqual(validated["next_subgoal"], "verify release date")
 
+    def test_switch_rejects_source_strategy_rephrasing(self):
+        raw = MODULE.boundary_contract()
+        raw.update(
+            {
+                "action": "SWITCH_LOOP",
+                "reason": "the first source failed",
+                "current_subgoal": "Find a reliable source listing states bordering Lake Superior",
+                "current_completion_test": "A source lists all bordering states",
+                "next_subgoal": "Find a different accessible source listing states bordering Lake Superior",
+                "next_completion_test": "A different source lists all bordering states",
+                "outcome": "BLOCKED",
+                "boundary_basis": "BLOCKED_OR_SATURATED",
+                "confidence": 0.8,
+            }
+        )
+        with self.assertRaisesRegex(ValueError, "rephrase the same"):
+            MODULE.validate_boundary(
+                raw,
+                committed_subgoal=raw["current_subgoal"],
+                committed_completion_test=raw["current_completion_test"],
+                first_step=False,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

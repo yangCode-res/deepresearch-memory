@@ -8,6 +8,7 @@ from copy import deepcopy
 import json
 import os
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -84,6 +85,25 @@ UPDATE_KEYS = {
     "evidence_sufficient",
     "expected_information_gain",
 }
+SEMANTIC_STOPWORDS = {
+    "a", "an", "the", "to", "of", "and", "or", "for", "from", "that", "this",
+    "different", "accessible", "reliable", "source", "information", "evidence",
+}
+
+
+def semantic_tokens(value: str) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", value.casefold())
+        if token not in SEMANTIC_STOPWORDS and len(token) > 2
+    }
+
+
+def semantic_similarity(left: str, right: str) -> float:
+    left_tokens, right_tokens = semantic_tokens(left), semantic_tokens(right)
+    if not left_tokens or not right_tokens:
+        return 0.0
+    return len(left_tokens & right_tokens) / len(left_tokens | right_tokens)
 
 
 def boundary_contract() -> dict[str, Any]:
@@ -160,6 +180,10 @@ def validate_boundary(
         or " ".join(current.casefold().split()) == " ".join(next_subgoal.casefold().split())
     ):
         raise ValueError("SWITCH requires a terminal outcome and distinct next work-unit contract")
+    if action == "SWITCH_LOOP" and semantic_similarity(current, next_subgoal) >= 0.6:
+        raise ValueError(
+            "SWITCH cannot merely rephrase the same information subgoal or change source/access strategy"
+        )
     if action == "READY_TO_ANSWER" and (
         outcome != "RESOLVED" or basis != "TASK_COMPLETE" or next_subgoal or next_test
     ):
