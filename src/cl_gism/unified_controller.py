@@ -650,6 +650,8 @@ class UnifiedMemoryController:
                 raise ValueError("SWITCH_LOOP requires a terminal outcome and non-NONE boundary_basis")
             if not next_subgoal:
                 raise ValueError("SWITCH_LOOP requires a non-empty next_loop_subgoal")
+            if _canonical_subgoal(current_subgoal) == _canonical_subgoal(next_subgoal):
+                raise ValueError("SWITCH_LOOP requires a genuinely different next_loop_subgoal")
         if task_status == "READY_TO_ANSWER" and research_phase != "ANSWER_SYNTHESIS":
             raise ValueError("READY_TO_ANSWER requires ANSWER_SYNTHESIS")
         if research_phase == "ANSWER_SYNTHESIS" and task_status != "READY_TO_ANSWER":

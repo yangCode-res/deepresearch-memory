@@ -225,12 +225,24 @@ def _deterministic_final_fallback(signal: ReadyToAnswerSignal) -> str:
     system_text = str(signal.compact_messages[0].get("content") or "")
     candidates = re.findall(r'"candidate_answer"\s*:\s*"([^"\\]+)"', system_text)
     candidate = next((item.strip() for item in reversed(candidates) if item.strip()), "Unknown")
-    citations = re.findall(r"【[^】]+】", "\n".join(
-        str(message.get("content") or "")
-        for message in signal.compact_messages
-        if str(message.get("role") or "") == "tool"
-    ))
-    citation = f" {citations[-1]}" if citations else ""
+    # Cite only a tool observation that actually contains the candidate. The
+    # old fallback selected the last citation globally and could attach an
+    # unrelated search result to an otherwise correct answer.
+    citation = ""
+    for message in reversed(signal.compact_messages):
+        if str(message.get("role") or "") != "tool":
+            continue
+        tool_text = str(message.get("content") or "")
+        if candidate.casefold() not in tool_text.casefold():
+            continue
+        doc_match = re.match(r"\s*\[(\d+)\]", tool_text)
+        if doc_match:
+            citation = f" [{doc_match.group(1)}]"
+            break
+        citations = re.findall(r"【[^】]+】", tool_text)
+        if citations:
+            citation = f" {citations[0]}"
+            break
     return (
         f"Explanation: The completed research evidence identifies the requested new brand as "
         f"{candidate}.{citation}\nExact Answer: {candidate}\nConfidence: 95%"

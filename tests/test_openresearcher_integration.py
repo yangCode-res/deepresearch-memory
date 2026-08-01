@@ -42,6 +42,27 @@ class FakeUnderlyingTokenizer:
 
 
 class ForcedFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
+    def test_deterministic_fallback_cites_only_candidate_evidence(self):
+        module = load_integration_module()
+        signal = module.ReadyToAnswerSignal(
+            "What is the brand?",
+            [],
+            [
+                {
+                    "role": "system",
+                    "content": '<cross_loop_memory>{"candidate_answer":"Vakkorama"}</cross_loop_memory>',
+                },
+                {"role": "user", "content": "What is the brand?"},
+                {"role": "tool", "content": "[12] Video Game Orchestra evidence"},
+                {"role": "tool", "content": "[35] Cem Hakko established Vakkorama in 1982."},
+            ],
+        )
+
+        content = module._deterministic_final_fallback(signal)
+
+        self.assertIn("Exact Answer: Vakkorama", content)
+        self.assertIn("[35]", content)
+        self.assertNotIn("[12]", content)
     async def test_ready_signal_forces_one_tool_free_final_generation(self):
         module = load_integration_module()
         underlying = FakeUnderlyingTokenizer()

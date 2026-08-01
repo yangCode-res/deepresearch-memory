@@ -278,6 +278,45 @@ class UnifiedControllerTests(unittest.TestCase):
                 current_phase="CANDIDATE_VERIFICATION",
             )
 
+    def test_rejects_switch_to_the_same_subgoal(self):
+        class SameSubgoalClient:
+            def complete_json(self, system_prompt, user_prompt):
+                return {
+                    "task_status": "SWITCH_LOOP",
+                    "research_phase": "DISCOVERY",
+                    "loop": {
+                        "switch": True,
+                        "reason": "fake boundary",
+                        "confidence": 0.8,
+                        "current_loop_subgoal": "identify the city",
+                        "next_loop_subgoal": " identify   the CITY ",
+                        "outcome": "BLOCKED",
+                        "boundary_basis": "BLOCKED_OR_SATURATED",
+                    },
+                    "state_delta": {
+                        "mode": "APPLY",
+                        "summary": "blocked",
+                        "operations": [{
+                            "operation": "ADD",
+                            "target": "uncertainties",
+                            "value": "City remains unknown.",
+                            "reason": "search saturated",
+                        }],
+                    },
+                    "retrieval": {"query": "city", "selected_memory_ids": [], "reason": ""},
+                }
+
+        anchor = TaskAnchor(task_id="same_subgoal", original_goal="Find the city")
+        state = HeuristicStateUpdater().initialize(anchor)
+        with self.assertRaisesRegex(ValueError, "genuinely different"):
+            UnifiedMemoryController(SameSubgoalClient()).decide(
+                anchor=anchor,
+                state=state,
+                current_loop=[],
+                latest_events=[],
+                candidates=[],
+            )
+
     def test_prompt_uses_a_domain_general_work_unit_contract(self):
         class RecordingClient:
             def __init__(self):
