@@ -205,15 +205,29 @@ def judge_boundary(
 ) -> dict[str, Any]:
     committed_subgoal = "" if first_step else str(working_state["current_subgoal"])
     committed_test = "" if first_step else str(working_state["completion_test"])
+    boundary_state = {
+        name: working_state.get(name)
+        for name in (
+            "current_subgoal",
+            "completion_test",
+            "progress_summary",
+            "resolved_aspects",
+            "open_aspects",
+            "candidate_answer",
+            "answer_stable",
+            "evidence_sufficient",
+            "expected_information_gain",
+        )
+    }
     payload = {
         "question": question,
         "committed_loop_contract": {
             "current_subgoal": committed_subgoal,
             "completion_test": committed_test,
         },
-        "working_state_before": working_state,
+        "working_state_before": boundary_state,
         "observed_messages": observed_messages,
-        "available_cross_loop_memories": prior_memories[-8:],
+        "available_cross_loop_memories": compact_memories(prior_memories),
         "required_output": boundary_contract(),
     }
     return call_and_repair(
@@ -294,8 +308,8 @@ def build_target(
     # work-unit contract. This avoids a second model restating it as a tool
     # action and then consuming repair tokens.
     update["next_direction"] = (
-        f"Objective: {boundary['current_subgoal']}. "
-        f"Stop when: {boundary['current_completion_test']}."
+        f"Objective: {boundary['current_subgoal'].rstrip('.')}. "
+        f"Stop when: {boundary['current_completion_test'].rstrip('.')}."
     )
     for name in ("open_aspects", "evidence_gaps"):
         values = update.get(name) if isinstance(update.get(name), list) else []
@@ -343,8 +357,8 @@ def build_target(
                     "progress_summary": "New loop initialized from the previous loop handoff.",
                     "open_aspects": list(setup.get("evidence_gaps") or [boundary["next_subgoal"]])[:8],
                     "next_direction": (
-                        f"Objective: {boundary['next_subgoal']}. "
-                        f"Stop when: {boundary['next_completion_test']}."
+                        f"Objective: {boundary['next_subgoal'].rstrip('.')}. "
+                        f"Stop when: {boundary['next_completion_test'].rstrip('.')}."
                     ),
                     "evidence_gaps": list(setup.get("evidence_gaps") or [])[:8],
                 }
@@ -407,7 +421,7 @@ def write_semantic_state(
         "working_state_before": working_state,
         "observed_messages": observed_messages,
         "current_loop_evidence_ids": sorted(seen_message_ids),
-        "available_cross_loop_memories": prior_memories[-8:],
+        "available_cross_loop_memories": compact_memories(prior_memories),
         "fixed_boundary_decision": boundary,
         "allowed_memory_ids": sorted(allowed_memory_ids),
         "required_output": semantic_contract(action, loop_number),
@@ -427,13 +441,27 @@ def write_semantic_state(
     )
 
 
-def compact_observed_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def compact_memories(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "memory_id": memory.get("memory_id"),
+            "summary": str(memory.get("summary") or "")[:600],
+            "durable_findings": list(memory.get("durable_findings") or [])[:4],
+            "unresolved_questions": list(memory.get("unresolved_questions") or [])[:3],
+        }
+        for memory in memories[-6:]
+    ]
+
+
+def compact_observed_messages(
+    messages: list[dict[str, Any]], *, tool_limit: int, assistant_limit: int
+) -> list[dict[str, Any]]:
     """Bound duplicated context sent to the two teacher stages."""
 
     compacted: list[dict[str, Any]] = []
     for message in messages:
         item = dict(message)
-        limit = 5000 if item.get("role") == "tool" else 1600
+        limit = tool_limit if item.get("role") == "tool" else assistant_limit
         text = str(item.get("text") or "")
         item["text"] = text[:limit]
         item["truncated"] = bool(item.get("truncated")) or len(text) > limit
@@ -477,12 +505,19 @@ def main() -> None:
     errors: list[dict[str, Any]] = []
     processed = 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    client = OpenAIChatJSONClient(
+    boundary_client = OpenAIChatJSONClient(
         api_key=args.api_key,
         model=args.model,
         base_url=args.base_url,
         timeout_seconds=300,
-        max_tokens=4096,
+        max_tokens=1024,
+    )
+    state_client = OpenAIChatJSONClient(
+        api_key=args.api_key,
+        model=args.model,
+        base_url=args.base_url,
+        timeout_seconds=300,
+        max_tokens=3072,
     )
     print(f"[pilot-v2] model={args.model} quotas={quotas}", flush=True)
     with args.output.open("w", encoding="utf-8") as output:
@@ -503,25 +538,30 @@ def main() -> None:
             first_step = True
             for step in steps:
                 processed += 1
-                observed_messages = compact_observed_messages(step["observed_messages"])
-                seen_ids.update(message["message_id"] for message in observed_messages)
+                boundary_messages = compact_observed_messages(
+                    step["observed_messages"], tool_limit=2500, assistant_limit=600
+                )
+                state_messages = compact_observed_messages(
+                    step["observed_messages"], tool_limit=4000, assistant_limit=1000
+                )
+                seen_ids.update(message["message_id"] for message in state_messages)
                 try:
                     boundary = judge_boundary(
-                        client,
+                        boundary_client,
                         question=question,
                         global_state=global_state,
                         working_state=working_state,
                         prior_memories=memories,
-                        observed_messages=observed_messages,
+                        observed_messages=boundary_messages,
                         first_step=first_step,
                     )
                     target = write_semantic_state(
-                        client,
+                        state_client,
                         question=question,
                         global_state=global_state,
                         working_state=working_state,
                         prior_memories=memories,
-                        observed_messages=observed_messages,
+                        observed_messages=state_messages,
                         boundary=boundary,
                         loop_number=loop_number,
                         seen_message_ids=seen_ids,
@@ -545,7 +585,7 @@ def main() -> None:
                             "question": question,
                             "global_intent_state_before": deepcopy(global_state),
                             "working_state_before": deepcopy(working_state),
-                            "observed_messages": observed_messages,
+                            "observed_messages": state_messages,
                             "current_loop_evidence_ids": sorted(seen_ids),
                             "available_cross_loop_memories": deepcopy(memories[-8:]),
                         },
@@ -580,10 +620,12 @@ def main() -> None:
         "processed_decision_points": processed,
         "errors": len(errors),
         "model": args.model,
-        "api_requests": client.request_count,
-        "prompt_tokens": client.total_prompt_tokens,
-        "completion_tokens": client.total_completion_tokens,
-        "total_tokens": client.total_tokens,
+        "api_requests": boundary_client.request_count + state_client.request_count,
+        "prompt_tokens": boundary_client.total_prompt_tokens + state_client.total_prompt_tokens,
+        "completion_tokens": (
+            boundary_client.total_completion_tokens + state_client.total_completion_tokens
+        ),
+        "total_tokens": boundary_client.total_tokens + state_client.total_tokens,
         "output": str(args.output),
         "preview": str(preview),
         "error_examples": errors[:20],
