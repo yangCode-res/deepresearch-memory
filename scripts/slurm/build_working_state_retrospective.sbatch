@@ -23,6 +23,13 @@ EXTRA_ARGS=()
 if [[ "${UNIQUE_QIDS:-1}" == "1" ]]; then
   EXTRA_ARGS+=(--unique-qids)
 fi
+if [[ -n "${EXCLUDE_QIDS_FILE:-}" ]]; then
+  EXTRA_ARGS+=(--exclude-qids-file "${EXCLUDE_QIDS_FILE}")
+fi
+if [[ -n "${EXCLUDE_QIDS:-}" ]]; then
+  read -r -a EXCLUDED_QID_VALUES <<< "${EXCLUDE_QIDS}"
+  EXTRA_ARGS+=(--exclude-qids "${EXCLUDED_QID_VALUES[@]}")
+fi
 
 python "${PROJECT_ROOT}/scripts/build_working_state_retrospective.py" \
   --input-glob "${PROJECT_ROOT}/data/openresearcher-dataset/seed_*/*.parquet" \

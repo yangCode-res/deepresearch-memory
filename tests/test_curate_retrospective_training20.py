@@ -40,6 +40,58 @@ class RetrospectiveCuratorTest(unittest.TestCase):
             value,
         )
 
+    def test_contract_override_repairs_text_without_changing_boundary(self):
+        segments = {
+            "7547": {
+                "segmentation": {
+                    "loops": [
+                        {
+                            "loop_number": 2,
+                            "start_decision_index": 2,
+                            "end_decision_index": 10,
+                            "subgoal": "Determine Joanna the requested values father-in-law",
+                            "completion_test": "Find the fatherthe requested values biography",
+                            "end_action": "READY_TO_ANSWER",
+                        }
+                    ]
+                }
+            }
+        }
+        applied = MODULE.apply_contract_overrides(
+            segments,
+            {
+                "7547": {
+                    "2": {
+                        "subgoal": "Determine Joanna's father",
+                        "completion_test": "Evidence establishes who Joanna's father was",
+                    }
+                }
+            },
+        )
+
+        loop = segments["7547"]["segmentation"]["loops"][0]
+        self.assertEqual(applied, ["7547"])
+        self.assertEqual(loop["subgoal"], "Determine Joanna's father")
+        self.assertEqual(loop["start_decision_index"], 2)
+        self.assertEqual(loop["end_decision_index"], 10)
+        self.assertEqual(loop["end_action"], "READY_TO_ANSWER")
+
+    def test_state_item_artifact_falls_back_to_repaired_contract(self):
+        fallback = "Evidence establishes who Joanna's father was"
+        artifacts = [
+            "Find the fatherthe requested values biography",
+            "Extract the requested value from the paper",
+            "Establish evidence that s (WHO, CDC) describe transmission",
+            "The the available evidence page confirms the claim",
+            "Evidence resolves information dependency 2",
+        ]
+        for artifact in artifacts:
+            with self.subTest(artifact=artifact):
+                self.assertEqual(
+                    MODULE.normalize_state_item(artifact, fallback=fallback),
+                    fallback,
+                )
+
     def test_choose_four_covers_both_sides_of_boundary(self):
         group = [
             sample(0, "CONTINUE_CURRENT_LOOP"),

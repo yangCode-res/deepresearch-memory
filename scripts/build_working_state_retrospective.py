@@ -356,8 +356,12 @@ def validate_segmentation(
         reason = _normalize_text(item["boundary_reason"])
         if not subgoal or not completion_test or not reason:
             raise ValueError("Loop contract and boundary reason cannot be empty")
-        if GENERIC_CONTRACT_PATTERN.search(f"{subgoal}\n{completion_test}"):
+        if GENERIC_CONTRACT_PATTERN.search(subgoal):
             raise ValueError("Loop contracts must name the specific information objective")
+        if GENERIC_CONTRACT_PATTERN.search(completion_test):
+            completion_test = (
+                f"Evidence is sufficient to {subgoal[:1].lower() + subgoal[1:]}"
+            )
         action = str(item["end_action"] or "").upper()
         outcome = str(item["outcome"] or "").upper()
         basis = str(item["boundary_basis"] or "").upper()
@@ -910,6 +914,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-loops-per-trajectory", type=int, default=1)
     parser.add_argument("--min-continues-per-trajectory", type=int, default=0)
     parser.add_argument("--unique-qids", action="store_true")
+    parser.add_argument("--exclude-qids", nargs="*", default=[])
+    parser.add_argument("--exclude-qids-file", type=Path)
     parser.add_argument("--min-decision-points", type=int, default=3)
     parser.add_argument("--max-decision-points", type=int, default=10)
     parser.add_argument("--max-trajectory-chars", type=int, default=70000)
@@ -919,6 +925,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--api-key", default=os.getenv("CL_GISM_CONTROLLER_API_KEY"))
     parser.add_argument("--preview-count", type=int, default=20)
     return parser.parse_args()
+
+
+def load_excluded_qids(values: list[str], path: Path | None = None) -> set[str]:
+    excluded = {str(value).strip() for value in values if str(value).strip()}
+    if path is None:
+        return excluded
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return excluded
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, list):
+        excluded.update(str(value).strip() for value in parsed if str(value).strip())
+    elif isinstance(parsed, dict) and isinstance(parsed.get("qids"), list):
+        excluded.update(str(value).strip() for value in parsed["qids"] if str(value).strip())
+    else:
+        excluded.update(line.strip() for line in text.splitlines() if line.strip())
+    return excluded
 
 
 def _usage(*clients: OpenAIChatJSONClient) -> dict[str, int]:
@@ -964,6 +990,8 @@ def main() -> None:
     causal_violations: list[dict[str, Any]] = []
     completed_trajectory_qids: list[str] = []
     attempted_qids: set[str] = set()
+    excluded_qids = load_excluded_qids(args.exclude_qids, args.exclude_qids_file)
+    skipped_excluded_qids = 0
     skipped_by_loop_count = 0
     skipped_by_continue_count = 0
     target_mode = args.target_trajectories > 0
@@ -1000,6 +1028,9 @@ def main() -> None:
                 continue
             messages = row.get("messages") or []
             qid = str(row.get("qid"))
+            if qid in excluded_qids:
+                skipped_excluded_qids += 1
+                continue
             if args.unique_qids and qid in attempted_qids:
                 continue
             steps = decision_steps(messages)
@@ -1261,6 +1292,8 @@ def main() -> None:
         "skipped_by_character_budget": skipped_chars,
         "skipped_by_loop_count": skipped_by_loop_count,
         "skipped_by_continue_count": skipped_by_continue_count,
+        "configured_excluded_qids": sorted(excluded_qids),
+        "skipped_excluded_qids": skipped_excluded_qids,
         "model": args.model,
         **_usage(segment_client, state_client),
         "output": str(args.output),

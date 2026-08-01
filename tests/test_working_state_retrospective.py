@@ -46,6 +46,20 @@ def loop_record(
 
 
 class RetrospectiveBuilderTest(unittest.TestCase):
+    def test_excluded_qids_load_from_json_or_lines(self):
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            json_path = Path(directory) / "qids.json"
+            json_path.write_text('["100", 200]', encoding="utf-8")
+            self.assertEqual(
+                MODULE.load_excluded_qids(["300"], json_path),
+                {"100", "200", "300"},
+            )
+            line_path = Path(directory) / "qids.txt"
+            line_path.write_text("400\n500\n", encoding="utf-8")
+            self.assertEqual(MODULE.load_excluded_qids([], line_path), {"400", "500"})
+
     def test_full_trajectory_view_includes_final_after_last_tool(self):
         messages = [
             {"role": "system", "content": "hidden"},
@@ -171,6 +185,26 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "specific information objective"):
             MODULE.validate_segmentation(raw, decision_count=1, has_final_answer=True)
+
+    def test_segmentation_derives_completion_from_specific_subgoal(self):
+        raw = {
+            "trajectory_summary": "specific objective with a weak completion placeholder",
+            "loops": [
+                loop_record(
+                    1,
+                    0,
+                    0,
+                    "READY_TO_ANSWER",
+                    subgoal="Identify the requested founding year",
+                )
+            ],
+        }
+        raw["loops"][0]["completion_test"] = "Evidence resolves information dependency 1"
+        segmented = MODULE.validate_segmentation(raw, decision_count=1, has_final_answer=True)
+        self.assertEqual(
+            segmented["loops"][0]["completion_test"],
+            "Evidence is sufficient to identify the requested founding year",
+        )
 
     def test_segmentation_rejects_same_claim_verification_loop(self):
         raw = {

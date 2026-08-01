@@ -1,0 +1,54 @@
+{
+  "5009": {
+    "2": {
+      "subgoal": "Verify that the candidate song matches the brand, recording-period, and country-chart clues",
+      "completion_test": "Evidence establishes that one candidate song satisfies all three identifying clues"
+    },
+    "3": {
+      "subgoal": "Establish whether a co-author was a single mother of four who gained legal credit after a lawsuit",
+      "completion_test": "Evidence establishes the co-author's family circumstances and later legal credit"
+    }
+  },
+  "5120": {
+    "2": {
+      "subgoal": "Extract the settlement name associated with Jayadewa in the identified Philippine inscription",
+      "completion_test": "Evidence establishes the settlement name exactly as it appears in the inscription"
+    }
+  },
+  "767": {
+    "2": {
+      "subgoal": "Extract the coalition-partner count and the described preparation trajectory from the article",
+      "completion_test": "Evidence establishes both the partner count and the article's trajectory description"
+    }
+  },
+  "3066": {
+    "1": {
+      "subgoal": "Identify the founder of Redpath Sugar",
+      "completion_test": "Evidence establishes who founded Redpath Sugar"
+    }
+  },
+  "3936": {
+    "2": {
+      "subgoal": "Determine the priority-admission conditions tied to recognition in the 2024 summer camp",
+      "completion_test": "Evidence establishes the conditions required for priority admission"
+    }
+  },
+  "738": {
+    "2": {
+      "subgoal": "Extract the founder, founding year, imperial-immediacy year, and post-secularization annexing state",
+      "completion_test": "Evidence establishes all four requested historical attributes of the identified religious house"
+    }
+  },
+  "2311": {
+    "1": {
+      "subgoal": "Identify the specified Scientific Reports study about bias in AI-generated news",
+      "completion_test": "The specified study is uniquely identified and its content is accessible"
+    }
+  },
+  "7547": {
+    "2": {
+      "subgoal": "Determine the father of Joanna of Châtillon and thereby identify Walter V's father-in-law",
+      "completion_test": "Evidence establishes who Joanna of Châtillon's father was"
+    }
+  }
+}

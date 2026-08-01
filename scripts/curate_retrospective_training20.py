@@ -45,6 +45,12 @@ GENERIC_COMPLETION_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+TEACHER_ARTIFACT_PATTERN = re.compile(
+    r"requested values?|\bthe fatherthe\b|\bthe the\b|\bIranthe\b|"
+    r"\bestablish evidence that\s+\(?s\)?(?=\s|\(|$)",
+    re.IGNORECASE,
+)
+
 
 def normalize_curated_contract(value: Any, *, fallback: str) -> str:
     """Sanitize operations while retaining answer types such as 'website'."""
@@ -68,6 +74,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--questions", type=int, default=5)
     parser.add_argument("--min-positive-retrieval", type=int, default=3)
     parser.add_argument("--include-qids", nargs="*", default=[])
+    parser.add_argument("--contract-overrides", type=Path)
     return parser.parse_args()
 
 
@@ -77,6 +84,58 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def qid_of(row: dict[str, Any]) -> str:
     return str(row["source"]["qid"])
+
+
+def apply_contract_overrides(
+    segment_by_qid: dict[str, dict[str, Any]], overrides: dict[str, Any]
+) -> list[str]:
+    """Apply explicit, reviewable text repairs without changing Loop boundaries."""
+
+    applied: list[str] = []
+    for qid, loop_overrides in overrides.items():
+        qid = str(qid)
+        segment = segment_by_qid.get(qid)
+        if segment is None:
+            raise ValueError(f"contract override references missing qid {qid}")
+        if not isinstance(loop_overrides, dict) or not loop_overrides:
+            raise ValueError(f"contract override for qid {qid} must name at least one Loop")
+        loops = {
+            str(loop["loop_number"]): loop
+            for loop in segment["segmentation"]["loops"]
+        }
+        for loop_number, replacement in loop_overrides.items():
+            loop = loops.get(str(loop_number))
+            if loop is None:
+                raise ValueError(f"contract override references missing qid {qid} Loop {loop_number}")
+            if not isinstance(replacement, dict) or set(replacement) != {
+                "subgoal",
+                "completion_test",
+            }:
+                raise ValueError(
+                    f"contract override for qid {qid} Loop {loop_number} must contain "
+                    "subgoal and completion_test"
+                )
+            subgoal = " ".join(str(replacement["subgoal"]).split()).strip()
+            completion = " ".join(str(replacement["completion_test"]).split()).strip()
+            if not subgoal or not completion or TEACHER_ARTIFACT_PATTERN.search(
+                f"{subgoal}\n{completion}"
+            ):
+                raise ValueError(f"contract override for qid {qid} Loop {loop_number} is invalid")
+            loop["subgoal"] = subgoal
+            loop["completion_test"] = completion
+        applied.append(qid)
+    return applied
+
+
+def normalize_state_item(value: Any, *, fallback: str) -> str:
+    raw = " ".join(str(value or "").strip().split())
+    if (
+        not raw
+        or TEACHER_ARTIFACT_PATTERN.search(raw)
+        or GENERIC_COMPLETION_PATTERN.search(raw)
+    ):
+        return fallback
+    return sanitize_contract_text(raw, fallback=fallback)
 
 
 def selected_memories(row: dict[str, Any]) -> list[str]:
@@ -182,11 +241,11 @@ def normalize_directional_contracts(
                     decision["next_subgoal"], visible_text=activation_visible[after_loop_number]
                 )
             after["open_aspects"] = [
-                sanitize_contract_text(item, fallback=after["current_subgoal"])
+                normalize_state_item(item, fallback=after["current_subgoal"])
                 for item in after.get("open_aspects") or []
             ]
             after["evidence_gaps"] = [
-                sanitize_contract_text(item, fallback=after["completion_test"])
+                normalize_state_item(item, fallback=after["completion_test"])
                 for item in after.get("evidence_gaps") or []
             ]
             after["next_direction"] = (
@@ -360,6 +419,15 @@ def main() -> None:
     for path in args.segments:
         for row in read_jsonl(path):
             segment_by_qid[qid_of(row)] = row
+    override_qids: list[str] = []
+    if args.contract_overrides:
+        raw_overrides = json.loads(args.contract_overrides.read_text(encoding="utf-8"))
+        if not isinstance(raw_overrides, dict):
+            raise SystemExit("--contract-overrides must contain a JSON object")
+        try:
+            override_qids = apply_contract_overrides(segment_by_qid, raw_overrides)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
     pool = list(pool_by_source.values())
     segments = list(segment_by_qid.values())
     grouped, segment_map, violations = validate_pool(pool, segments)
@@ -457,6 +525,7 @@ def main() -> None:
         "pool_trajectories": len(grouped),
         "eligible_trajectories": len(eligible),
         "rejected_pool_qids": sorted(invalid_qids),
+        "contract_override_qids": override_qids,
         "pool_violations": violations,
         "selection_violations": [],
         "output": str(args.output),
