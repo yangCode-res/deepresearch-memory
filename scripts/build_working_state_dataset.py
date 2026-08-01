@@ -55,8 +55,9 @@ DELTA_FIELDS = {
     "completed_subgoal",
 }
 CONCRETE_ACTION_PATTERN = re.compile(
-    r"(^|[.!?;]\s*)(search|query|open|visit|browse|google|click|use\s+(?:the\s+)?browser|"
-    r"搜索|查询|查找|打开|访问|点击)\b|https?://|\b(browser\.search|browser\.open)\b",
+    r"(^|[.!?;]\s*)(search|query|open|view|visit|browse|google|click|read|inspect|look\s+up|"
+    r"use\s+(?:the\s+)?browser|搜索|查询|查找|打开|查看|访问|点击)\b|https?://|"
+    r"\b(browser\.search|browser\.open|wikipedia|google|bing)\b",
     re.IGNORECASE,
 )
 
@@ -224,9 +225,13 @@ def validate_label(
     direction = str(working["next_direction"] or "").strip()
     if not direction:
         raise ValueError("working_state_after.next_direction cannot be empty")
-    if CONCRETE_ACTION_PATTERN.search(direction):
+    policy_text = "\n".join(
+        [direction, str(working["completion_test"]), *working["open_aspects"], *working["evidence_gaps"]]
+    )
+    if CONCRETE_ACTION_PATTERN.search(policy_text):
         raise ValueError(
-            "next_direction must state an objective and stop condition, not an exact search/open/tool action"
+            "directional Working State fields must state information objectives and stop conditions, "
+            "not exact search/open/view actions, named websites, or tools"
         )
     cited_ids = set(
         re.findall(
@@ -351,8 +356,9 @@ from hypotheses; record failed strategy families; describe an objective and stop
 an exact query, URL, browser tool, or mandatory action. A StateDelta contains only durable cross-loop changes
 and is APPLY exactly at SWITCH_LOOP or READY_TO_ANSWER. Cross-loop memory must cite only supplied msg_NNNN IDs.
 Select only supplied prior memory IDs. Search-result snippets are provisional evidence, not automatically
-authoritative or primary sources. CONTINUE always uses outcome=IN_PROGRESS and boundary_basis=NONE. Prefer not
-to end a loop over inventing unsupported progress."""
+authoritative or primary sources; Wikipedia is never a primary source. Do not name a website in next_direction,
+completion_test, open_aspects, or evidence_gaps. CONTINUE always uses outcome=IN_PROGRESS and
+boundary_basis=NONE. Prefer not to end a loop over inventing unsupported progress."""
 
 
 def output_contract(loop_number: int) -> dict[str, Any]:
