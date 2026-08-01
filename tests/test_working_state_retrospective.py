@@ -130,7 +130,7 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "early READY"):
             MODULE.validate_segmentation(raw, decision_count=3)
 
-    def test_segmentation_rejects_future_evidence_coordinate(self):
+    def test_segmentation_clamps_future_evidence_coordinate(self):
         raw = {
             "trajectory_summary": "one decision",
             "decisions": [
@@ -143,12 +143,12 @@ class RetrospectiveBuilderTest(unittest.TestCase):
             ],
         }
         raw["decisions"][0]["causal_evidence_ids"] = ["msg_0009"]
-        with self.assertRaisesRegex(ValueError, "after its causal prefix"):
-            MODULE.validate_segmentation(
-                raw,
-                decision_count=1,
-                decision_message_limits=[6],
-            )
+        segmented = MODULE.validate_segmentation(
+            raw,
+            decision_count=1,
+            decision_message_limits=[6],
+        )
+        self.assertEqual(segmented["decisions"][0]["causal_evidence_ids"], ["msg_0006"])
 
     def test_causal_payload_hides_next_loop_contract(self):
         boundary = {

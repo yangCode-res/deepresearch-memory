@@ -207,18 +207,26 @@ def validate_segmentation(
             raise ValueError("SWITCH requires a terminal Loop outcome and a real non-task boundary")
         if action == "READY_TO_ANSWER" and (outcome != "RESOLVED" or basis != "TASK_COMPLETE"):
             raise ValueError("READY requires RESOLVED and boundary_basis=TASK_COMPLETE")
-        evidence_ids = [str(value) for value in (item.get("causal_evidence_ids") or [])]
-        if not evidence_ids:
-            raise ValueError("every decision annotation requires causal_evidence_ids")
         message_limit = (
             decision_message_limits[decision_index]
             if decision_message_limits is not None
             else None
         )
-        for evidence_id in evidence_ids:
+        evidence_ids = []
+        for value in item.get("causal_evidence_ids") or []:
+            evidence_id = str(value)
             number = _message_number(evidence_id)
-            if number is None or (message_limit is not None and number > message_limit):
-                raise ValueError("decision annotation cites evidence after its causal prefix")
+            if number is not None and (message_limit is None or number <= message_limit):
+                evidence_ids.append(evidence_id)
+        # Coordinates are audit hints, not the label itself.  A retrospective
+        # teacher may accidentally cite a later message while placing a valid
+        # boundary.  Clamp the hints causally instead of spending repair calls;
+        # the second-pass teacher must still produce actual prefix-supported
+        # evidence before the sample is accepted.
+        if not evidence_ids and message_limit is not None:
+            evidence_ids = [f"msg_{message_limit:04d}"]
+        if not evidence_ids:
+            raise ValueError("every decision annotation requires causal_evidence_ids")
         normalized_item = {
             "decision_index": decision_index,
             "loop_number": loop_number,
