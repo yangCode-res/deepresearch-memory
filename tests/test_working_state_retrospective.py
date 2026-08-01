@@ -210,6 +210,13 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         self.assertNotIn("May and June 2020", contract)
         self.assertNotRegex(contract.casefold(), r"\b(searching|opening)\b")
 
+    def test_contract_sanitizer_removes_domain_names(self):
+        cleaned = MODULE.sanitize_contract_text(
+            "Confirm the claim with reggaeville.com",
+            fallback="Evidence confirms the requested claim",
+        )
+        self.assertNotIn("reggaeville.com", cleaned)
+
     def test_causal_payload_hides_next_loop_contract(self):
         boundary = {
             "action": "SWITCH_LOOP",
@@ -346,6 +353,54 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         self.assertEqual(target["state_delta"]["mode"], "NOOP")
         self.assertIsNone(target["cross_loop_memory"])
         self.assertFalse(any(target["state_delta"]["operations"].values()))
+
+    def test_continue_information_gain_does_not_increase_inside_loop(self):
+        operations = {
+            name: ([] if name != "completed_subgoal" else "")
+            for name in MODULE.DELTA_FIELDS
+        }
+        raw = {
+            "decision_reason": "same objective",
+            "progress": {
+                "progress_summary": "Additional evidence arrived in msg_0009.",
+                "resolved_aspects": [],
+                "open_aspects": ["Confirmation remains."],
+                "key_evidence": ["A candidate is supported by msg_0009."],
+                "candidate_answer": "",
+                "active_hypotheses": [],
+                "failed_strategies": [],
+                "evidence_gaps": ["Confirmation remains."],
+                "answer_stable": False,
+                "evidence_sufficient": False,
+                "expected_information_gain": "HIGH",
+            },
+            "durable_update": operations,
+            "loop_memory": None,
+            "retrieval": {"query": "claim", "relevant_memory_ids": [], "reason": "none"},
+        }
+        boundary = {
+            "action": "CONTINUE_CURRENT_LOOP",
+            "reason": "",
+            "current_subgoal": "Establish the requested claim",
+            "current_completion_test": "Evidence confirms the requested claim",
+            "next_subgoal": "",
+            "next_completion_test": "",
+            "outcome": "IN_PROGRESS",
+            "boundary_basis": "NONE",
+            "confidence": 1.0,
+            "progress": {},
+        }
+        before = MODULE.initial_working_state()
+        before["expected_information_gain"] = "MEDIUM"
+        target = MODULE.validate_causal_raw(
+            raw,
+            boundary=boundary,
+            working_before=before,
+            loop_number=1,
+            seen_message_ids={"msg_0009"},
+            allowed_memory_ids=set(),
+        )
+        self.assertEqual(target["working_state_after"]["expected_information_gain"], "MEDIUM")
 
 
 if __name__ == "__main__":

@@ -139,7 +139,8 @@ def _normalize_text(value: Any) -> str:
 
 
 GLOBAL_CONCRETE_PATTERN = re.compile(
-    r"https?://|\b(browser\.(?:search|open)|wikipedia|google|bing|search(?:ing)?|query(?:ing)?|"
+    r"https?://|\b[a-z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|uk)\b|"
+    r"\b(browser\.(?:search|open)|wikipedia|google|bing|search(?:ing)?|query(?:ing)?|"
     r"open(?:ing)?|view(?:ing)?|visit(?:ing)?|browse|click(?:ing)?|read(?:ing)?|inspect(?:ing)?|"
     r"look(?:ing)?\s+up)\b|搜索|查询|查找|打开|查看|访问|点击",
     re.IGNORECASE,
@@ -151,6 +152,12 @@ def sanitize_contract_text(value: Any, *, fallback: str) -> str:
 
     text = _normalize_text(value)
     text = re.sub(r"https?://\S+", "the relevant evidence", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(?:www\.)?[a-z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|uk)\b",
+        "an available source",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(
         r"\b(browser\.(?:search|open)|wikipedia|google|bing)\b",
         "the available evidence",
@@ -552,6 +559,15 @@ def validate_causal_raw(
         progress["evidence_sufficient"] = False
         if progress["expected_information_gain"] == "LOW":
             progress["expected_information_gain"] = "MEDIUM"
+        if action == "CONTINUE_CURRENT_LOOP":
+            gain_rank = {"LOW": 0, "MEDIUM": 1, "HIGH": 2}
+            previous_gain = str(
+                working_before.get("expected_information_gain") or "HIGH"
+            ).upper()
+            if previous_gain in gain_rank and (
+                gain_rank[progress["expected_information_gain"]] > gain_rank[previous_gain]
+            ):
+                progress["expected_information_gain"] = previous_gain
 
     operations_raw = raw.get("durable_update") if isinstance(raw.get("durable_update"), dict) else {}
     operations: dict[str, Any] = {}
