@@ -217,6 +217,39 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         )
         self.assertNotIn("reggaeville.com", cleaned)
 
+    def test_contract_sanitizer_removes_source_and_doc_operations(self):
+        source_goal = MODULE.sanitize_contract_text(
+            "Find another source confirming that resistance increases with temperature",
+            fallback="Establish how resistance changes with temperature",
+        )
+        doc_gap = MODULE.sanitize_contract_text(
+            "Need to view Doc 4323047 to extract a direct statement",
+            fallback="Evidence must establish how resistance changes with temperature",
+        )
+        self.assertFalse(MODULE.GLOBAL_CONCRETE_PATTERN.search(source_goal))
+        self.assertFalse(MODULE.GLOBAL_CONCRETE_PATTERN.search(doc_gap))
+
+    def test_contract_sanitizer_rewrites_reference_strategy_as_information_goal(self):
+        converted = MODULE.sanitize_contract_text(
+            "Find an independent reference confirming the conversion factor",
+            fallback="Evidence resolves the conversion factor",
+        )
+        self.assertEqual(converted, "Independently verify the conversion factor")
+
+    def test_artifact_question_gets_specific_fallback_contract(self):
+        question = "According to the study, on what date did the event occur?"
+        self.assertIn("referenced artifact", MODULE.subgoal_fallback(question, 1))
+        self.assertIn("relevant passage", MODULE.completion_fallback(question, 1))
+
+    def test_future_percentage_is_not_masked_by_visible_line_numbers(self):
+        visible = "L15: the target article is available"
+        cleaned = MODULE.scrub_future_literals(
+            "Evidence verifies the exact 15% statistic",
+            visible_text=visible,
+        )
+        self.assertNotIn("15%", cleaned)
+        self.assertIn("requested value", cleaned)
+
     def test_causal_payload_hides_next_loop_contract(self):
         boundary = {
             "action": "SWITCH_LOOP",

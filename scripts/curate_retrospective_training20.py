@@ -23,6 +23,10 @@ from build_working_state_retrospective import (  # noqa: E402
     GLOBAL_CONCRETE_PATTERN,
     audit_record_causality,
     boundary_for_decision,
+    completion_fallback,
+    sanitize_contract_text,
+    scrub_future_literals,
+    subgoal_fallback,
 )
 
 
@@ -33,6 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--questions", type=int, default=5)
     parser.add_argument("--min-positive-retrieval", type=int, default=3)
+    parser.add_argument("--include-qids", nargs="*", default=[])
     return parser.parse_args()
 
 
@@ -48,6 +53,96 @@ def selected_memories(row: dict[str, Any]) -> list[str]:
     return [str(value) for value in row["target"]["retrieval"].get("relevant_memory_ids") or []]
 
 
+def normalize_directional_contracts(
+    grouped: dict[str, list[dict[str, Any]]],
+    segment_map: dict[str, dict[str, Any]],
+) -> None:
+    """Apply the latest mechanical policy to an already-generated causal replay."""
+
+    for qid, group in grouped.items():
+        question = str(group[0]["input"].get("question") or "") if group else ""
+        segment_record = segment_map.get(qid)
+        if segment_record:
+            for loop in segment_record["segmentation"]["loops"]:
+                loop_number = int(loop.get("loop_number") or 1)
+                goal_fallback = subgoal_fallback(question, loop_number)
+                test_fallback = completion_fallback(question, loop_number)
+                raw_goal = str(loop.get("subgoal") or "")
+                loop["subgoal"] = sanitize_contract_text(raw_goal, fallback=goal_fallback)
+                if raw_goal.startswith("Establish information dependency"):
+                    loop["subgoal"] = goal_fallback
+                loop["completion_test"] = sanitize_contract_text(
+                    loop["completion_test"], fallback=test_fallback
+                )
+        group.sort(key=lambda item: int(item["source"]["step_index"]))
+        previous_after: dict[str, Any] | None = None
+        activation_visible: dict[int, str] = {}
+        for row in group:
+            if previous_after is not None:
+                row["input"]["working_state_before"] = deepcopy(previous_after)
+            visible_text = "\n".join(
+                [
+                    question,
+                    *[
+                        str(message.get("text") or "")
+                        for message in row["input"].get("observed_messages") or []
+                    ],
+                ]
+            )
+            target = row["target"]
+            decision = target["loop_decision"]
+            current_loop_number = int(str(row["input"]["working_state_before"]["loop_id"]).rsplit("_", 1)[-1])
+            activation_visible.setdefault(current_loop_number, visible_text)
+            current_fallback = subgoal_fallback(question, current_loop_number)
+            current_raw = str(decision.get("current_subgoal") or "")
+            decision["current_subgoal"] = sanitize_contract_text(current_raw, fallback=current_fallback)
+            if current_raw.startswith("Establish information dependency"):
+                decision["current_subgoal"] = current_fallback
+            decision["current_subgoal"] = scrub_future_literals(
+                decision["current_subgoal"],
+                visible_text=activation_visible[current_loop_number],
+            )
+            if decision.get("next_subgoal"):
+                decision["next_subgoal"] = sanitize_contract_text(
+                    decision["next_subgoal"],
+                    fallback="Establish the next distinct information dependency required by the user question",
+                )
+            after = target["working_state_after"]
+            after_loop_number = int(str(after["loop_id"]).rsplit("_", 1)[-1])
+            activation_visible.setdefault(after_loop_number, visible_text)
+            after_fallback = subgoal_fallback(question, after_loop_number)
+            after_raw = str(after.get("current_subgoal") or "")
+            after["current_subgoal"] = sanitize_contract_text(after_raw, fallback=after_fallback)
+            if after_raw.startswith("Establish information dependency"):
+                after["current_subgoal"] = after_fallback
+            after["current_subgoal"] = scrub_future_literals(
+                after["current_subgoal"], visible_text=activation_visible[after_loop_number]
+            )
+            after["completion_test"] = sanitize_contract_text(
+                after.get("completion_test"),
+                fallback=completion_fallback(question, after_loop_number),
+            )
+            after["completion_test"] = scrub_future_literals(
+                after["completion_test"], visible_text=activation_visible[after_loop_number]
+            )
+            if decision.get("next_subgoal"):
+                decision["next_subgoal"] = scrub_future_literals(
+                    decision["next_subgoal"], visible_text=activation_visible[after_loop_number]
+                )
+            after["open_aspects"] = [
+                sanitize_contract_text(item, fallback=after["current_subgoal"])
+                for item in after.get("open_aspects") or []
+            ]
+            after["evidence_gaps"] = [
+                sanitize_contract_text(item, fallback=after["completion_test"])
+                for item in after.get("evidence_gaps") or []
+            ]
+            after["next_direction"] = (
+                f"Objective: {after['current_subgoal']}. Stop when: {after['completion_test']}."
+            )
+            previous_after = after
+
+
 def validate_pool(
     rows: list[dict[str, Any]], segments: list[dict[str, Any]]
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -56,6 +151,7 @@ def validate_pool(
         grouped[qid_of(row)].append(row)
     segment_map = {qid_of(item): item for item in segments}
     violations: list[dict[str, Any]] = []
+    normalize_directional_contracts(grouped, segment_map)
 
     for qid, group in grouped.items():
         group.sort(key=lambda item: int(item["source"]["step_index"]))
@@ -194,11 +290,17 @@ def main() -> None:
     pool = read_jsonl(args.pool)
     segments = read_jsonl(args.segments)
     grouped, segment_map, violations = validate_pool(pool, segments)
-    if violations:
-        raise SystemExit(json.dumps({"pool_violations": violations[:30]}, ensure_ascii=False, indent=2))
+    invalid_qids = {str(item["qid"]) for item in violations if item.get("qid") is not None}
+    global_violations = [item for item in violations if item.get("qid") is None]
+    if global_violations:
+        raise SystemExit(
+            json.dumps({"pool_violations": global_violations[:30]}, ensure_ascii=False, indent=2)
+        )
 
     eligible: list[str] = []
     for qid, group in grouped.items():
+        if qid in invalid_qids:
+            continue
         actions = Counter(item["target"]["loop_decision"]["action"] for item in group)
         if actions["SWITCH_LOOP"] >= 1 and actions["READY_TO_ANSWER"] == 1 and actions["CONTINUE_CURRENT_LOOP"] >= 2:
             eligible.append(qid)
@@ -209,7 +311,15 @@ def main() -> None:
             qid,
         )
     )
-    chosen_qids = eligible[: args.questions]
+    if args.include_qids:
+        chosen_qids = [str(qid) for qid in args.include_qids]
+        if len(chosen_qids) != args.questions or len(set(chosen_qids)) != args.questions:
+            raise SystemExit("--include-qids must name exactly --questions distinct qids")
+        unavailable = [qid for qid in chosen_qids if qid not in eligible]
+        if unavailable:
+            raise SystemExit(f"requested qids are not eligible: {unavailable}")
+    else:
+        chosen_qids = eligible[: args.questions]
     if len(chosen_qids) != args.questions:
         raise SystemExit(f"only {len(chosen_qids)} eligible complete multi-Loop trajectories")
 
@@ -269,7 +379,8 @@ def main() -> None:
         "pool_samples": len(pool),
         "pool_trajectories": len(grouped),
         "eligible_trajectories": len(eligible),
-        "pool_violations": [],
+        "rejected_pool_qids": sorted(invalid_qids),
+        "pool_violations": violations,
         "selection_violations": [],
         "output": str(args.output),
     }

@@ -146,8 +146,10 @@ def _normalize_text(value: Any) -> str:
 GLOBAL_CONCRETE_PATTERN = re.compile(
     r"https?://|\b[a-z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|uk)\b|"
     r"\b(browser\.(?:search|open)|wikipedia|google|bing|search(?:ing)?|query(?:ing)?|"
-    r"open(?:ing)?|view(?:ing)?|visit(?:ing)?|browse|click(?:ing)?|read(?:ing)?|inspect(?:ing)?|"
-    r"look(?:ing)?\s+up)\b|搜索|查询|查找|打开|查看|访问|点击",
+    r"open(?:s|ed|ing)?|view(?:s|ed|ing)?|visit(?:s|ed|ing)?|browse|click(?:s|ed|ing)?|"
+    r"read(?:ing)?|inspect(?:ed|ing)?|look(?:ing)?\s+up|source|website|webpage|"
+    r"search\s+result|snippet|doc\s*\d+|url)\b|"
+    r"搜索|查询|查找|打开|查看|访问|点击|来源|搜索结果|片段",
     re.IGNORECASE,
 )
 
@@ -155,7 +157,7 @@ GLOBAL_CONCRETE_PATTERN = re.compile(
 def sanitize_contract_text(value: Any, *, fallback: str) -> str:
     """Convert tool/source phrasing into an information-objective contract."""
 
-    text = _normalize_text(value)
+    text = _normalize_text(value).rstrip(" .;；。")
     text = re.sub(r"https?://\S+", "the relevant evidence", text, flags=re.IGNORECASE)
     text = re.sub(
         r"\b(?:www\.)?[a-z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|uk)\b",
@@ -170,6 +172,45 @@ def sanitize_contract_text(value: Any, *, fallback: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(
+        r"^(?:search|establish)\s+for\s+additional\s+references\s+to\s+corroborate\s+(.+)$",
+        r"Corroborate \1 with additional independent evidence",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^find\s+an?\s+independent\s+reference\s+confirming\s+(.+)$",
+        r"Independently verify \1",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"^locate\s+a\s+worked\s+solution\s+for\s+(.+)$",
+        r"Establish \1 using a worked calculation",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:find|locate|obtain|consult|check|use)\s+"
+        r"(?:(?:an?|another|a\s+second|independent|reliable|authoritative)\s+)?source\s*"
+        r"(?:that\s+|which\s+|confirming\s+|stating\s+|for\s+|about\s+)?",
+        "Establish evidence that ",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:view|open|inspect|read)\s+(?:a\s+)?(?:specific\s+)?"
+        r"(?:doc(?:ument)?\s*\d+|search\s+result|snippet)\b",
+        "establish the remaining evidence",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"\b(?:an?\s+)?(?:website|webpage)\s+(?:is\s+)?opened\s+that\s+(?:contains|states)",
+        "evidence directly states",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
         r"(^|[.!?;]\s*)(search|query|open|view|visit|browse|click|read|inspect|look\s+up|"
         r"use\s+(?:the\s+)?browser)\b",
         r"\1Establish",
@@ -177,8 +218,31 @@ def sanitize_contract_text(value: Any, *, fallback: str) -> str:
         flags=re.IGNORECASE,
     )
     text = re.sub(r"(^|[。！？；]\s*)(搜索|查询|查找|打开|查看|访问|点击)", r"\1确定", text)
-    text = _normalize_text(text)
+    text = _normalize_text(text).rstrip(" .;；。")
+    fallback = _normalize_text(fallback).rstrip(" .;；。")
+    if re.match(r"^Establish (?:for\b|results\b)", text, flags=re.IGNORECASE):
+        return fallback
     return fallback if not text or GLOBAL_CONCRETE_PATTERN.search(text) else text
+
+
+def subgoal_fallback(question: str, loop_number: int) -> str:
+    if loop_number == 1 and re.search(
+        r"\b(article|study|paper|report|document|titled|according\s+to)\b|文章|研究|论文|报告|题为",
+        question,
+        flags=re.IGNORECASE,
+    ):
+        return "Identify the referenced artifact and the passage needed to resolve the user's requested fact"
+    return f"Establish information dependency {loop_number} required by the user question"
+
+
+def completion_fallback(question: str, loop_number: int) -> str:
+    if loop_number == 1 and re.search(
+        r"\b(article|study|paper|report|document|titled|according\s+to)\b|文章|研究|论文|报告|题为",
+        question,
+        flags=re.IGNORECASE,
+    ):
+        return "The referenced artifact and relevant passage are identified in the observed evidence"
+    return f"Evidence resolves information dependency {loop_number}"
 
 
 def scrub_future_literals(value: str, *, visible_text: str) -> str:
@@ -211,7 +275,7 @@ def scrub_future_literals(value: str, *, visible_text: str) -> str:
         token = match.group(0)
         return token if token.casefold() in visible else "the requested value"
 
-    text = re.sub(r"\b\d[\d,.:%-]*\b", scrub_number, text)
+    text = re.sub(r"(?<!\w)\d[\d,.:-]*%?(?![\w%])", scrub_number, text)
     return _normalize_text(text)
 
 
@@ -251,11 +315,11 @@ def validate_segmentation(
             raise ValueError("Loops must contiguously cover decision points from decision 0")
         subgoal = sanitize_contract_text(
             item["subgoal"],
-            fallback=f"Establish information dependency {loop_number} required by the user question",
+            fallback=subgoal_fallback(question, loop_number),
         )
         completion_test = sanitize_contract_text(
             item["completion_test"],
-            fallback=f"Evidence resolves information dependency {loop_number}",
+            fallback=completion_fallback(question, loop_number),
         )
         if decision_message_limits is not None:
             visible_end = decision_message_limits[0 if start == 0 else start - 1]
@@ -549,6 +613,14 @@ def validate_causal_raw(
         values = progress[name] if isinstance(progress[name], list) else []
         transform = cited if name == "key_evidence" else replace_unseen_ids
         progress[name] = [transform(item)[:500] for item in values if _normalize_text(item)][:8]
+    progress["open_aspects"] = [
+        sanitize_contract_text(item, fallback=boundary["current_subgoal"])
+        for item in progress["open_aspects"]
+    ]
+    progress["evidence_gaps"] = [
+        sanitize_contract_text(item, fallback=boundary["current_completion_test"])
+        for item in progress["evidence_gaps"]
+    ]
     gain = str(progress["expected_information_gain"] or "").upper()
     if gain not in GAIN_LEVELS:
         gain = "HIGH"

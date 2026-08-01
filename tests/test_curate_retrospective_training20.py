@@ -1,5 +1,6 @@
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
+from copy import deepcopy
 import sys
 import unittest
 
@@ -68,6 +69,94 @@ class RetrospectiveCuratorTest(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "SWITCH"):
             MODULE.choose_four(group)
+
+    def test_normalization_cleans_direction_and_preserves_replay_chain(self):
+        before = {
+            "loop_id": "loop_001",
+            "current_subgoal": "initial goal",
+            "completion_test": "initial test",
+        }
+        after = {
+            "loop_id": "loop_001",
+            "current_subgoal": "Find another source confirming the requested fact",
+            "completion_test": "A webpage is opened that contains the requested fact",
+            "open_aspects": ["Find another source confirming the requested fact"],
+            "evidence_gaps": ["Need to view Doc 42"],
+            "next_direction": "view Doc 42",
+        }
+        rows = [
+            {
+                "source": {"qid": "qid-1", "step_index": 0},
+                "input": {"working_state_before": deepcopy(before)},
+                "target": {
+                    "loop_decision": {
+                        "current_subgoal": "Find another source confirming the requested fact",
+                        "next_subgoal": "",
+                    },
+                    "working_state_after": deepcopy(after),
+                },
+            },
+            {
+                "source": {"qid": "qid-1", "step_index": 1},
+                "input": {"working_state_before": deepcopy(after)},
+                "target": {
+                    "loop_decision": {
+                        "current_subgoal": "Find another source confirming the requested fact",
+                        "next_subgoal": "",
+                    },
+                    "working_state_after": deepcopy(after),
+                },
+            },
+        ]
+        segments = {
+            "qid-1": {
+                "segmentation": {
+                    "loops": [
+                        {
+                            "subgoal": "Find another source confirming the requested fact",
+                            "completion_test": "A webpage is opened that contains the requested fact",
+                        }
+                    ]
+                }
+            }
+        }
+
+        MODULE.normalize_directional_contracts({"qid-1": rows}, segments)
+
+        rendered = str(rows[0]["target"]["working_state_after"])
+        self.assertFalse(MODULE.GLOBAL_CONCRETE_PATTERN.search(rendered))
+        self.assertEqual(
+            rows[0]["target"]["working_state_after"],
+            rows[1]["input"]["working_state_before"],
+        )
+
+    def test_normalization_scrubs_future_number_at_loop_activation(self):
+        row = {
+            "source": {"qid": "qid-2", "step_index": 0},
+            "input": {
+                "question": "According to the article, what percentage is reported?",
+                "observed_messages": [{"text": "The correct article was identified."}],
+                "working_state_before": {"loop_id": "loop_001"},
+            },
+            "target": {
+                "loop_decision": {
+                    "current_subgoal": "Extract the requested percentage",
+                    "next_subgoal": "",
+                },
+                "working_state_after": {
+                    "loop_id": "loop_001",
+                    "current_subgoal": "Extract the requested percentage",
+                    "completion_test": "Evidence verifies the exact 15% statistic",
+                    "open_aspects": [],
+                    "evidence_gaps": [],
+                    "next_direction": "",
+                },
+            },
+        }
+
+        MODULE.normalize_directional_contracts({"qid-2": [row]}, {})
+
+        self.assertNotIn("15%", row["target"]["working_state_after"]["completion_test"])
 
 
 if __name__ == "__main__":
