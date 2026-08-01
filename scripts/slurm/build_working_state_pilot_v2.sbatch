@@ -25,5 +25,6 @@ python "${PROJECT_ROOT}/scripts/build_working_state_pilot_v2.py" \
   --switch-target 6 \
   --ready-target 4 \
   --max-steps-per-trajectory 40 \
+  --max-trajectory-decision-points 12 \
   --model mimo-v2.5 \
   --preview-count 20

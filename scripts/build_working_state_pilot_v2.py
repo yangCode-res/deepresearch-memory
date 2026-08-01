@@ -477,6 +477,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--switch-target", type=int, default=6)
     parser.add_argument("--ready-target", type=int, default=4)
     parser.add_argument("--max-steps-per-trajectory", type=int, default=40)
+    parser.add_argument("--max-trajectory-decision-points", type=int, default=12)
     parser.add_argument("--seed", type=int, default=20260801)
     parser.add_argument("--model", default=os.getenv("CL_GISM_DATA_MODEL", "mimo-v2.5"))
     parser.add_argument("--base-url", default=os.getenv("CL_GISM_CONTROLLER_BASE_URL"))
@@ -504,6 +505,7 @@ def main() -> None:
     records: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
     processed = 0
+    skipped_long_trajectories = 0
     args.output.parent.mkdir(parents=True, exist_ok=True)
     boundary_client = OpenAIChatJSONClient(
         api_key=args.api_key,
@@ -528,6 +530,9 @@ def main() -> None:
                 continue
             steps = decision_steps(row.get("messages") or [])[: args.max_steps_per_trajectory]
             if not steps:
+                continue
+            if len(steps) > args.max_trajectory_decision_points:
+                skipped_long_trajectories += 1
                 continue
             question = str(row.get("question") or "").strip()
             global_state = initial_global_state(question)
@@ -555,6 +560,11 @@ def main() -> None:
                         observed_messages=boundary_messages,
                         first_step=first_step,
                     )
+                    if (
+                        boundary["action"] == "READY_TO_ANSWER"
+                        and counts["READY_TO_ANSWER"] >= quotas["READY_TO_ANSWER"]
+                    ):
+                        break
                     target = write_semantic_state(
                         state_client,
                         question=question,
@@ -618,6 +628,7 @@ def main() -> None:
         "generated": counts,
         "valid_samples": len(records),
         "processed_decision_points": processed,
+        "skipped_long_trajectories": skipped_long_trajectories,
         "errors": len(errors),
         "model": args.model,
         "api_requests": boundary_client.request_count + state_client.request_count,
