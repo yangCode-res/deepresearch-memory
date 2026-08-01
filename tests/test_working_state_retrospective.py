@@ -40,7 +40,7 @@ def decision(
         "outcome": outcome,
         "boundary_basis": basis,
         "boundary_reason": "The evidence objective has reached its retrospective boundary.",
-        "causal_evidence_ids": [f"msg_{6 + index * 3:04d}"],
+        "boundary_message_ids": [f"msg_{6 + index * 3:04d}"],
     }
 
 
@@ -58,8 +58,10 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         self.assertEqual([item["role"] for item in view], ["assistant", "tool", "assistant"])
         self.assertEqual(view[-1]["text"], "final answer")
         self.assertEqual(view[1]["decision_index"], 0)
+        lookahead = MODULE.decision_lookahead_view(messages)
+        self.assertEqual(lookahead[0]["following_assistant_messages_before_next_tool"][0]["text"], "final answer")
 
-    def test_segmentation_maps_ranges_to_actions_and_allows_early_ready(self):
+    def test_segmentation_maps_decisions_to_loops(self):
         raw = {
             "trajectory_summary": "identify candidate, verify date, then answer",
             "decisions": [
@@ -76,8 +78,9 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         }
         segmented = MODULE.validate_segmentation(
             raw,
-            decision_count=6,
-            decision_message_limits=[6, 9, 12, 15, 18, 21],
+            decision_count=4,
+            decision_message_limits=[6, 9, 12, 15],
+            has_final_answer=True,
         )
         self.assertEqual(len(segmented["loops"]), 2)
         self.assertEqual(segmented["loops"][0]["end_decision_index"], 1)
@@ -107,9 +110,9 @@ class RetrospectiveBuilderTest(unittest.TestCase):
             ],
         }
         with self.assertRaisesRegex(ValueError, "consecutive"):
-            MODULE.validate_segmentation(raw, decision_count=3)
+            MODULE.validate_segmentation(raw, decision_count=2)
 
-    def test_incomplete_segmentation_must_cover_all_decisions(self):
+    def test_segmentation_must_cover_all_decisions(self):
         raw = {
             "trajectory_summary": "unfinished research",
             "decisions": [
@@ -127,10 +130,10 @@ class RetrospectiveBuilderTest(unittest.TestCase):
                 ),
             ],
         }
-        with self.assertRaisesRegex(ValueError, "early READY"):
+        with self.assertRaisesRegex(ValueError, "annotate every"):
             MODULE.validate_segmentation(raw, decision_count=3)
 
-    def test_segmentation_clamps_future_evidence_coordinate(self):
+    def test_segmentation_allows_retrospective_lookahead_coordinate(self):
         raw = {
             "trajectory_summary": "one decision",
             "decisions": [
@@ -142,13 +145,26 @@ class RetrospectiveBuilderTest(unittest.TestCase):
                 )
             ],
         }
-        raw["decisions"][0]["causal_evidence_ids"] = ["msg_0009"]
+        raw["decisions"][0]["boundary_message_ids"] = ["msg_0009"]
         segmented = MODULE.validate_segmentation(
             raw,
             decision_count=1,
             decision_message_limits=[6],
+            trajectory_message_limit=9,
+            has_final_answer=True,
         )
-        self.assertEqual(segmented["decisions"][0]["causal_evidence_ids"], ["msg_0006"])
+        self.assertEqual(segmented["decisions"][0]["boundary_message_ids"], ["msg_0009"])
+
+    def test_segmentation_rejects_ready_before_final_decision(self):
+        raw = {
+            "trajectory_summary": "agent keeps researching after the first observation",
+            "decisions": [
+                decision(0, 1, "READY_TO_ANSWER", subgoal="Establish the requested date"),
+                decision(1, 1, "READY_TO_ANSWER", subgoal="Establish the requested date"),
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "final tool-result"):
+            MODULE.validate_segmentation(raw, decision_count=2, has_final_answer=True)
 
     def test_segmentation_normalizes_action_dependent_enums(self):
         raw = {

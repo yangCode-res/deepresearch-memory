@@ -55,20 +55,19 @@ from build_working_state_pilot_v2 import (  # noqa: E402
 SEGMENTATION_SYSTEM_PROMPT = """You retrospectively segment one complete deep-research trajectory into Loops.
 Return valid JSON only. Do not reveal chain-of-thought and do not reproduce the final answer.
 
-You may read messages after a decision point only to determine the correct boundary label. A Loop is one
-coherent, independently decidable information subgoal with one observable completion test. A different query,
-tool, source, URL, failed search, or access strategy is not a new Loop. End a Loop only when its information
-subgoal is resolved, refuted, saturated, superseded, or the following work pursues a genuinely different
-dependency. Use READY_TO_ANSWER at the earliest tool-result decision point whose causal prefix already contains
-stable, sufficient support for the exact answer. If the original agent searched after that point, leave those
-trailing decisions outside the segmentation. If sufficient support is never reached, the last action is
-CONTINUE_CURRENT_LOOP and all decisions remain covered.
+This is behavioral retrospective segmentation, not counterfactual optimization. Read the following assistant
+message(s) after every tool result to determine what research phase the recorded agent actually entered next.
+A Loop is one coherent, independently decidable information subgoal with one observable completion test. A
+different query, tool, source, URL, failed search, or another verification of the same exact claim is not a new
+Loop. Mark CONTINUE when the following agent work continues the same information objective. Mark SWITCH only
+when the following agent work pursues a genuinely different, independently decidable dependency. Mark READY
+only when the following agent content transitions to the final answer without another research tool call.
 
-Do not imitate the original agent's choice to keep searching. Audit every decision independently. For example,
-if decision 1's tool result explicitly states the exact requested answer and decisions 2-4 only locate, repeat,
-or reformat the same evidence, decision 1 MUST be READY_TO_ANSWER and decisions 2-4 MUST be omitted. For each
-included decision, cite causal_evidence_ids no later than that decision's tool result. These coordinates prove
-what was actually knowable at that point; later messages may never be cited for an earlier decision.
+Do not label an earlier point READY merely because hindsight reveals that its evidence could have been enough.
+If the recorded agent performs later verification of the same claim, those decisions remain in the same Loop.
+Annotate every tool-result decision in the trajectory. Cite boundary_message_ids from the current tool result
+and/or following assistant message(s) that make the phase relation visible. These IDs are retrospective audit
+coordinates and are kept outside the eventual model-training input.
 
 Decision indices refer only to tool-result messages marked with decision_index. Decision annotations must start
 at 0 and be consecutive. loop_number starts at 1; it stays unchanged after CONTINUE and increases by exactly one
@@ -103,7 +102,7 @@ DECISION_ANNOTATION_KEYS = {
     "outcome",
     "boundary_basis",
     "boundary_reason",
-    "causal_evidence_ids",
+    "boundary_message_ids",
 }
 CAUSAL_KEYS = {
     "decision_reason",
@@ -129,8 +128,8 @@ def segmentation_contract(decision_count: int) -> dict[str, Any]:
                     "NONE|SUBGOAL_COMPLETED|SUBGOAL_CHANGED|CANDIDATE_CHANGED|"
                     "BLOCKED_OR_SATURATED|PHASE_TRANSITION|TASK_COMPLETE"
                 ),
-                "boundary_reason": "short explanation based only on this decision's causal prefix",
-                "causal_evidence_ids": ["msg_NNNN at or before this decision's tool result"],
+                "boundary_reason": "short explanation of how following agent work relates to the current Loop",
+                "boundary_message_ids": ["current tool and/or following assistant msg_NNNN"],
             }
         ],
     }
@@ -150,6 +149,8 @@ def validate_segmentation(
     *,
     decision_count: int,
     decision_message_limits: list[int] | None = None,
+    trajectory_message_limit: int | None = None,
+    has_final_answer: bool | None = None,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != SEGMENTATION_KEYS:
         raise ValueError("segmentation response has missing or extra fields")
@@ -157,8 +158,8 @@ def validate_segmentation(
     decisions = raw.get("decisions")
     if not summary or not isinstance(decisions, list) or not decisions:
         raise ValueError("segmentation requires a summary and at least one decision annotation")
-    if len(decisions) > decision_count:
-        raise ValueError("segmentation contains more decisions than the trajectory")
+    if len(decisions) != decision_count:
+        raise ValueError("retrospective segmentation must annotate every tool-result decision")
     if decision_message_limits is not None and len(decision_message_limits) != decision_count:
         raise ValueError("decision_message_limits must cover the complete trajectory")
 
@@ -220,21 +221,18 @@ def validate_segmentation(
             if decision_message_limits is not None
             else None
         )
-        evidence_ids = []
-        for value in item.get("causal_evidence_ids") or []:
+        boundary_message_ids = []
+        for value in item.get("boundary_message_ids") or []:
             evidence_id = str(value)
             number = _message_number(evidence_id)
-            if number is not None and (message_limit is None or number <= message_limit):
-                evidence_ids.append(evidence_id)
-        # Coordinates are audit hints, not the label itself.  A retrospective
-        # teacher may accidentally cite a later message while placing a valid
-        # boundary.  Clamp the hints causally instead of spending repair calls;
-        # the second-pass teacher must still produce actual prefix-supported
-        # evidence before the sample is accepted.
-        if not evidence_ids and message_limit is not None:
-            evidence_ids = [f"msg_{message_limit:04d}"]
-        if not evidence_ids:
-            raise ValueError("every decision annotation requires causal_evidence_ids")
+            if number is not None and (
+                trajectory_message_limit is None or number <= trajectory_message_limit
+            ):
+                boundary_message_ids.append(evidence_id)
+        if not boundary_message_ids and message_limit is not None:
+            boundary_message_ids = [f"msg_{message_limit:04d}"]
+        if not boundary_message_ids:
+            raise ValueError("every decision annotation requires boundary_message_ids")
         normalized_item = {
             "decision_index": decision_index,
             "loop_number": loop_number,
@@ -244,7 +242,7 @@ def validate_segmentation(
             "outcome": outcome,
             "boundary_basis": basis,
             "boundary_reason": reason,
-            "causal_evidence_ids": evidence_ids,
+            "boundary_message_ids": boundary_message_ids,
         }
         normalized.append(normalized_item)
         previous = normalized_item
@@ -252,10 +250,12 @@ def validate_segmentation(
     final = normalized[-1]
     if final["action"] == "SWITCH_LOOP":
         raise ValueError("the final included decision cannot SWITCH without a following Loop decision")
-    if final["action"] != "READY_TO_ANSWER" and len(normalized) != decision_count:
-        raise ValueError("only an early READY decision may exclude trailing decisions")
     if any(item["action"] == "READY_TO_ANSWER" for item in normalized[:-1]):
-        raise ValueError("READY must be the final included decision")
+        raise ValueError("READY is only valid at the final tool-result decision")
+    if has_final_answer is True and final["action"] != "READY_TO_ANSWER":
+        raise ValueError("a successful trajectory ending in a final answer requires READY at its last decision")
+    if has_final_answer is False and final["action"] == "READY_TO_ANSWER":
+        raise ValueError("READY requires a following final-answer transition")
 
     loops: list[dict[str, Any]] = []
     for item in normalized:
@@ -321,6 +321,29 @@ def trajectory_view(
     return result, decision_index
 
 
+def decision_lookahead_view(
+    messages: list[dict[str, Any]], *, assistant_limit: int = 1000
+) -> list[dict[str, Any]]:
+    """Expose the recorded next assistant work explicitly to the segmenter."""
+
+    tool_positions = [index for index, message in enumerate(messages) if message.get("role") == "tool"]
+    result: list[dict[str, Any]] = []
+    for decision_index, tool_pos in enumerate(tool_positions):
+        next_tool_pos = tool_positions[decision_index + 1] if decision_index + 1 < len(tool_positions) else len(messages)
+        following: list[dict[str, Any]] = []
+        for pos in range(tool_pos + 1, next_tool_pos):
+            if messages[pos].get("role") == "assistant":
+                following.append(compact_message(messages[pos], pos + 1, text_limit=assistant_limit))
+        result.append(
+            {
+                "decision_index": decision_index,
+                "tool_message_id": f"msg_{tool_pos + 1:04d}",
+                "following_assistant_messages_before_next_tool": following,
+            }
+        )
+    return result
+
+
 def call_and_repair(
     client: OpenAIChatJSONClient,
     *,
@@ -353,10 +376,13 @@ def segment_trajectory(
     messages: list[dict[str, Any]],
     decision_count: int,
     decision_message_limits: list[int] | None = None,
+    decision_lookahead: list[dict[str, Any]] | None = None,
+    has_final_answer: bool | None = None,
 ) -> dict[str, Any]:
     payload = {
         "question": question,
         "complete_trajectory": messages,
+        "decision_lookahead": decision_lookahead or [],
         "decision_count": decision_count,
         "required_output": segmentation_contract(decision_count),
     }
@@ -368,6 +394,8 @@ def segment_trajectory(
             raw,
             decision_count=decision_count,
             decision_message_limits=decision_message_limits,
+            trajectory_message_limit=max((int(item["index"]) for item in messages), default=None),
+            has_final_answer=has_final_answer,
         ),
     )
 
@@ -717,6 +745,13 @@ def main() -> None:
                 skipped_length += 1
                 continue
             full_view, decision_count = trajectory_view(messages)
+            lookahead_view = decision_lookahead_view(messages)
+            has_final_answer = any(
+                message.get("role") == "assistant"
+                and message.get("channel") == "final"
+                and bool(str(message.get("content") or "").strip())
+                for message in messages
+            )
             trajectory_chars = len(json.dumps(full_view, ensure_ascii=False))
             if trajectory_chars > args.max_trajectory_chars:
                 skipped_chars += 1
@@ -732,6 +767,8 @@ def main() -> None:
                         int(step["prefix_end_message_index"])
                         for step in steps
                     ],
+                    decision_lookahead=lookahead_view,
+                    has_final_answer=has_final_answer,
                 )
             except Exception as exc:
                 errors.append({"stage": "segmentation", "qid": row.get("qid"), "error": str(exc)})
