@@ -81,7 +81,7 @@ prescribe or name a query, source, website, URL, tool, search/open/view action, 
 
 For CONTINUE_CURRENT_LOOP, durable_update is empty and loop_memory is null. For SWITCH_LOOP or READY_TO_ANSWER,
 write only durable findings supported by the causal prefix and a compact handoff memory. Select only allowed
-memory IDs. Every confirmed fact, rejected finding, resolved aspect, and durable finding must include a supplied
+memory IDs. Every confirmed fact, rejected finding, key evidence, and durable finding must include a supplied
 msg_NNNN coordinate. A terminal loop_memory must contain at least one evidence_id. The next Loop contract is
 deliberately hidden from you so it cannot leak future content into the current Loop's evidence or memory."""
 
@@ -376,10 +376,6 @@ def validate_causal_raw(
             raise ValueError("every key_evidence item must cite at least one msg_NNNN ID")
         if not ids <= seen_message_ids:
             raise ValueError("key_evidence cites a message outside the causal current-Loop prefix")
-    for item in progress["resolved_aspects"]:
-        ids = set(re.findall(r"\bmsg_\d{4}\b", item))
-        if not ids or not ids <= seen_message_ids:
-            raise ValueError("every resolved_aspects item must cite a causal-prefix msg_NNNN ID")
     for name in ("answer_stable", "evidence_sufficient"):
         if not isinstance(progress[name], bool):
             raise ValueError(f"progress.{name} must be boolean")
