@@ -15,6 +15,7 @@ import json
 import os
 from pathlib import Path
 import random
+import re
 import sys
 from typing import Any, Iterable
 
@@ -53,6 +54,11 @@ DELTA_FIELDS = {
     "resolve_open_questions",
     "completed_subgoal",
 }
+CONCRETE_ACTION_PATTERN = re.compile(
+    r"(^|[.!?;]\s*)(search|query|open|visit|browse|google|click|use\s+(?:the\s+)?browser|"
+    r"搜索|查询|查找|打开|访问|点击)\b|https?://|\b(browser\.search|browser\.open)\b",
+    re.IGNORECASE,
+)
 
 
 def message_text(message: dict[str, Any]) -> str:
@@ -215,6 +221,27 @@ def validate_label(
     working["expected_information_gain"] = gain
     if not str(working["current_subgoal"]).strip() or not str(working["completion_test"]).strip():
         raise ValueError("working state requires a subgoal and completion test")
+    direction = str(working["next_direction"] or "").strip()
+    if not direction:
+        raise ValueError("working_state_after.next_direction cannot be empty")
+    if CONCRETE_ACTION_PATTERN.search(direction):
+        raise ValueError(
+            "next_direction must state an objective and stop condition, not an exact search/open/tool action"
+        )
+    cited_ids = set(
+        re.findall(
+            r"\bmsg_\d{4}\b",
+            "\n".join(
+                [working["progress_summary"], *working["key_evidence"], *working["resolved_aspects"]]
+            ),
+        )
+    )
+    if not cited_ids <= seen_message_ids:
+        raise ValueError("working state cites unseen message IDs")
+    if not working["evidence_sufficient"] and not (
+        working["evidence_gaps"] or working["open_aspects"]
+    ):
+        raise ValueError("insufficient evidence requires an explicit evidence gap or open aspect")
 
     decision = raw["loop_decision"]
     if not isinstance(decision, dict):
@@ -225,6 +252,32 @@ def validate_label(
     decision["action"] = action
     if not str(decision.get("reason") or "").strip():
         raise ValueError("loop_decision.reason cannot be empty")
+    outcome = str(decision.get("outcome") or "").upper()
+    boundary_basis = str(decision.get("boundary_basis") or "").upper()
+    next_subgoal = str(decision.get("next_subgoal") or "").strip()
+    current_subgoal = str(decision.get("current_subgoal") or "").strip()
+    if not current_subgoal:
+        raise ValueError("loop_decision.current_subgoal cannot be empty")
+    if action == "CONTINUE_CURRENT_LOOP" and (
+        outcome != "IN_PROGRESS" or boundary_basis != "NONE" or next_subgoal
+    ):
+        raise ValueError(
+            "CONTINUE_CURRENT_LOOP requires IN_PROGRESS, boundary_basis=NONE, and empty next_subgoal"
+        )
+    if action == "SWITCH_LOOP" and (
+        outcome == "IN_PROGRESS"
+        or boundary_basis == "NONE"
+        or not next_subgoal
+        or " ".join(current_subgoal.casefold().split())
+        == " ".join(next_subgoal.casefold().split())
+    ):
+        raise ValueError("SWITCH_LOOP requires a terminal outcome, real boundary, and distinct next subgoal")
+    if action == "READY_TO_ANSWER" and (
+        outcome != "RESOLVED" or boundary_basis != "TASK_COMPLETE" or next_subgoal
+    ):
+        raise ValueError(
+            "READY_TO_ANSWER requires RESOLVED, TASK_COMPLETE, and empty next_subgoal"
+        )
     expected_loop_id = (
         f"loop_{loop_number + 1:03d}" if action == "SWITCH_LOOP" else f"loop_{loop_number:03d}"
     )
@@ -297,7 +350,9 @@ Working State is loop-local and directional. Preserve evidence-bearing progress;
 from hypotheses; record failed strategy families; describe an objective and stop condition, but never prescribe
 an exact query, URL, browser tool, or mandatory action. A StateDelta contains only durable cross-loop changes
 and is APPLY exactly at SWITCH_LOOP or READY_TO_ANSWER. Cross-loop memory must cite only supplied msg_NNNN IDs.
-Select only supplied prior memory IDs. Prefer not to end a loop over inventing unsupported progress."""
+Select only supplied prior memory IDs. Search-result snippets are provisional evidence, not automatically
+authoritative or primary sources. CONTINUE always uses outcome=IN_PROGRESS and boundary_basis=NONE. Prefer not
+to end a loop over inventing unsupported progress."""
 
 
 def output_contract(loop_number: int) -> dict[str, Any]:

@@ -46,7 +46,9 @@ class WorkingStateDatasetTest(unittest.TestCase):
                 "status": "IN_PROGRESS",
                 "current_subgoal": "identify candidate",
                 "completion_test": "one candidate is evidenced",
+                "open_aspects": ["direct support for the candidate"],
                 "key_evidence": ["claim [msg_0005]"],
+                "next_direction": "Establish the candidate from reliable evidence; stop once it is directly supported.",
                 "expected_information_gain": "HIGH",
             }
         )
@@ -54,6 +56,7 @@ class WorkingStateDatasetTest(unittest.TestCase):
             {
                 "action": "CONTINUE_CURRENT_LOOP",
                 "reason": "the candidate is not established",
+                "next_subgoal": "",
                 "outcome": "IN_PROGRESS",
                 "boundary_basis": "NONE",
             }
