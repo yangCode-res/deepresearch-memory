@@ -130,14 +130,24 @@ def validate_boundary(
         raw["boundary_basis"] = "NONE"
     if not current or not completion:
         raise ValueError("current subgoal and completion test are required")
+    outcome = str(raw["outcome"] or "").upper()
+    basis = str(raw["boundary_basis"] or "").upper()
+    # action is the learned judgment; dependent enum fields are mechanical.
+    if action == "CONTINUE_CURRENT_LOOP":
+        outcome, basis, next_subgoal, next_test = "IN_PROGRESS", "NONE", "", ""
+    elif action == "READY_TO_ANSWER":
+        outcome, basis, next_subgoal, next_test = "RESOLVED", "TASK_COMPLETE", "", ""
+    elif action == "SWITCH_LOOP":
+        if outcome == "IN_PROGRESS":
+            outcome = "RESOLVED"
+        if basis == "NONE":
+            basis = "SUBGOAL_COMPLETED" if outcome == "RESOLVED" else "SUBGOAL_CHANGED"
     policy_text = "\n".join([current, completion, next_subgoal, next_test])
     if CONCRETE_ACTION_PATTERN.search(policy_text):
         raise ValueError(
             "subgoals and completion tests must describe information outcomes, not concrete actions, "
             "named websites, URLs, or tools"
         )
-    outcome = str(raw["outcome"] or "").upper()
-    basis = str(raw["boundary_basis"] or "").upper()
     if action == "CONTINUE_CURRENT_LOOP" and (
         outcome != "IN_PROGRESS" or basis != "NONE" or next_subgoal or next_test
     ):
@@ -304,6 +314,10 @@ def build_target(
     if not isinstance(update, dict) or set(update) != UPDATE_KEYS:
         raise ValueError("working_state_update has missing or extra fields")
     action = boundary["action"]
+    if action == "READY_TO_ANSWER":
+        update["answer_stable"] = True
+        update["evidence_sufficient"] = True
+        update["expected_information_gain"] = "LOW"
     # The controller's directional policy is deterministic from the validated
     # work-unit contract. This avoids a second model restating it as a tool
     # action and then consuming repair tokens.
