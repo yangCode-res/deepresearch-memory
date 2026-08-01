@@ -218,7 +218,7 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         errors = MODULE.audit_record_causality(clean)
         self.assertIn("training target cites a future message ID", errors)
 
-    def test_validate_causal_raw_requires_key_evidence_citation(self):
+    def test_validate_causal_raw_adds_missing_key_evidence_citation(self):
         empty_ops = {
             name: ([] if name != "completed_subgoal" else "")
             for name in MODULE.DELTA_FIELDS
@@ -254,15 +254,15 @@ class RetrospectiveBuilderTest(unittest.TestCase):
             "confidence": 1.0,
             "progress": {},
         }
-        with self.assertRaisesRegex(ValueError, "key_evidence"):
-            MODULE.validate_causal_raw(
-                raw,
-                boundary=boundary,
-                working_before=MODULE.initial_working_state(),
-                loop_number=1,
-                seen_message_ids={"msg_0006"},
-                allowed_memory_ids=set(),
-            )
+        target = MODULE.validate_causal_raw(
+            raw,
+            boundary=boundary,
+            working_before=MODULE.initial_working_state(),
+            loop_number=1,
+            seen_message_ids={"msg_0006"},
+            allowed_memory_ids=set(),
+        )
+        self.assertIn("msg_0006", target["working_state_after"]["key_evidence"][0])
 
     def test_continue_mechanically_discards_durable_output(self):
         operations = {

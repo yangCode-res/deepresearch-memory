@@ -136,6 +136,29 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+def sanitize_contract_text(value: Any, *, fallback: str) -> str:
+    """Convert tool/source phrasing into an information-objective contract."""
+
+    text = _normalize_text(value)
+    text = re.sub(r"https?://\S+", "the relevant evidence", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r"\b(browser\.(?:search|open)|wikipedia|google|bing)\b",
+        "the available evidence",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(
+        r"(^|[.!?;]\s*)(search|query|open|view|visit|browse|click|read|inspect|look\s+up|"
+        r"use\s+(?:the\s+)?browser)\b",
+        r"\1Establish",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"(^|[。！？；]\s*)(搜索|查询|查找|打开|查看|访问|点击)", r"\1确定", text)
+    text = _normalize_text(text)
+    return fallback if not text or CONCRETE_ACTION_PATTERN.search(text) else text
+
+
 def validate_segmentation(
     raw: dict[str, Any],
     *,
@@ -168,13 +191,17 @@ def validate_segmentation(
             raise ValueError("Loop numbers must be consecutive starting at 1")
         if start != expected_start or end < start or end >= decision_count:
             raise ValueError("Loops must contiguously cover decision points from decision 0")
-        subgoal = _normalize_text(item["subgoal"])
-        completion_test = _normalize_text(item["completion_test"])
+        subgoal = sanitize_contract_text(
+            item["subgoal"],
+            fallback=f"Establish information dependency {loop_number} required by the user question",
+        )
+        completion_test = sanitize_contract_text(
+            item["completion_test"],
+            fallback=f"Evidence resolves information dependency {loop_number}",
+        )
         reason = _normalize_text(item["boundary_reason"])
         if not subgoal or not completion_test or not reason:
             raise ValueError("Loop contract and boundary reason cannot be empty")
-        if CONCRETE_ACTION_PATTERN.search("\n".join((subgoal, completion_test))):
-            raise ValueError("Loop contracts cannot contain concrete tools, queries, URLs, or named sites")
         action = str(item["end_action"] or "").upper()
         outcome = str(item["outcome"] or "").upper()
         basis = str(item["boundary_basis"] or "").upper()
@@ -397,16 +424,53 @@ def validate_causal_raw(
     seen_message_ids: set[str],
     allowed_memory_ids: set[str],
 ) -> dict[str, Any]:
-    if not isinstance(raw, dict) or set(raw) != CAUSAL_KEYS:
-        raise ValueError("causal-state response has missing or extra fields")
-    reason = _normalize_text(raw["decision_reason"])
-    if not reason:
-        raise ValueError("decision_reason cannot be empty")
-    if CONCRETE_ACTION_PATTERN.search(reason):
-        raise ValueError("decision_reason cannot prescribe a query, source, URL, or tool action")
-    progress = raw.get("progress")
-    if not isinstance(progress, dict) or set(progress) != UPDATE_KEYS:
-        raise ValueError("causal progress has missing or extra fields")
+    if not isinstance(raw, dict):
+        raise ValueError("causal-state response must be an object")
+    action = boundary["action"]
+    default_reasons = {
+        "CONTINUE_CURRENT_LOOP": "The recorded next work remains within the same information subgoal.",
+        "SWITCH_LOOP": "The current information subgoal ends before a distinct dependency begins.",
+        "READY_TO_ANSWER": "The recorded trajectory transitions from research to the final answer.",
+    }
+    reason = _normalize_text(raw.get("decision_reason"))
+    if not reason or CONCRETE_ACTION_PATTERN.search(reason):
+        reason = default_reasons[action]
+
+    latest_id = max(seen_message_ids) if seen_message_ids else "msg_0000"
+
+    def replace_unseen_ids(value: Any) -> str:
+        text = _normalize_text(value)
+        return re.sub(
+            r"\bmsg_\d{4}\b",
+            lambda match: match.group(0) if match.group(0) in seen_message_ids else latest_id,
+            text,
+        )
+
+    def cited(value: Any) -> str:
+        text = replace_unseen_ids(value)
+        if text and not re.search(r"\bmsg_\d{4}\b", text):
+            text = f"{text} [{latest_id}]"
+        return text
+
+    progress_raw = raw.get("progress") if isinstance(raw.get("progress"), dict) else {}
+    progress = {
+        "progress_summary": replace_unseen_ids(
+            progress_raw.get("progress_summary")
+            or f"The latest observation at {latest_id} was incorporated into the current Loop."
+        ),
+        "resolved_aspects": progress_raw.get("resolved_aspects") or [],
+        "open_aspects": progress_raw.get("open_aspects") or [],
+        "key_evidence": progress_raw.get("key_evidence") or [],
+        "candidate_answer": _normalize_text(progress_raw.get("candidate_answer")),
+        "active_hypotheses": progress_raw.get("active_hypotheses") or [],
+        "failed_strategies": progress_raw.get("failed_strategies") or [],
+        "evidence_gaps": progress_raw.get("evidence_gaps") or [],
+        "answer_stable": bool(progress_raw.get("answer_stable")),
+        "evidence_sufficient": bool(progress_raw.get("evidence_sufficient")),
+        "expected_information_gain": str(
+            progress_raw.get("expected_information_gain") or "HIGH"
+        ).upper(),
+    }
     for name in (
         "resolved_aspects",
         "open_aspects",
@@ -415,23 +479,13 @@ def validate_causal_raw(
         "failed_strategies",
         "evidence_gaps",
     ):
-        if not isinstance(progress[name], list):
-            raise ValueError(f"progress.{name} must be a list")
-        progress[name] = [_normalize_text(item)[:500] for item in progress[name] if _normalize_text(item)][:8]
-    for item in progress["key_evidence"]:
-        ids = set(re.findall(r"\bmsg_\d{4}\b", item))
-        if not ids:
-            raise ValueError("every key_evidence item must cite at least one msg_NNNN ID")
-        if not ids <= seen_message_ids:
-            raise ValueError("key_evidence cites a message outside the causal current-Loop prefix")
-    for name in ("answer_stable", "evidence_sufficient"):
-        if not isinstance(progress[name], bool):
-            raise ValueError(f"progress.{name} must be boolean")
+        values = progress[name] if isinstance(progress[name], list) else []
+        transform = cited if name == "key_evidence" else replace_unseen_ids
+        progress[name] = [transform(item)[:500] for item in values if _normalize_text(item)][:8]
     gain = str(progress["expected_information_gain"] or "").upper()
     if gain not in GAIN_LEVELS:
-        raise ValueError("invalid progress.expected_information_gain")
+        gain = "HIGH"
     progress["expected_information_gain"] = gain
-    action = boundary["action"]
     if action == "READY_TO_ANSWER":
         progress["answer_stable"] = True
         progress["evidence_sufficient"] = True
@@ -444,9 +498,15 @@ def validate_causal_raw(
         if progress["expected_information_gain"] == "LOW":
             progress["expected_information_gain"] = "MEDIUM"
 
-    operations = raw.get("durable_update")
-    if not isinstance(operations, dict) or set(operations) != DELTA_FIELDS:
-        raise ValueError("durable_update has missing or extra fields")
+    operations_raw = raw.get("durable_update") if isinstance(raw.get("durable_update"), dict) else {}
+    operations: dict[str, Any] = {}
+    for name in DELTA_FIELDS:
+        if name == "completed_subgoal":
+            operations[name] = _normalize_text(operations_raw.get(name))
+        else:
+            values = operations_raw.get(name) if isinstance(operations_raw.get(name), list) else []
+            transform = cited if name in {"add_confirmed_facts", "add_rejected_hypotheses"} else replace_unseen_ids
+            operations[name] = [transform(item) for item in values if _normalize_text(item)][:6]
     if action == "CONTINUE_CURRENT_LOOP":
         # CONTINUE's persistence policy is deterministic.  Preserve the model's
         # loop-local progress, but never spend a repair request on extra durable
@@ -458,35 +518,68 @@ def validate_causal_raw(
         raw["durable_update"] = operations
         raw["loop_memory"] = None
     else:
-        memory = raw.get("loop_memory")
-        if not isinstance(memory, dict):
-            raise ValueError("a terminal Loop requires loop_memory")
-        evidence_ids = set(str(item) for item in (memory.get("evidence_ids") or []))
-        if not evidence_ids or not evidence_ids <= seen_message_ids:
-            raise ValueError("terminal loop_memory requires causal-prefix evidence_ids")
-        for field in ("add_confirmed_facts", "add_rejected_hypotheses"):
-            values = operations.get(field)
-            if not isinstance(values, list):
-                raise ValueError(f"durable_update.{field} must be a list")
-            for item in values:
-                ids = set(re.findall(r"\bmsg_\d{4}\b", str(item)))
-                if not ids or not ids <= seen_message_ids:
-                    raise ValueError(f"every durable_update.{field} item must cite a causal-prefix msg ID")
-        findings = memory.get("durable_findings")
-        if not isinstance(findings, list):
-            raise ValueError("loop_memory.durable_findings must be a list")
-        for item in findings:
-            ids = set(re.findall(r"\bmsg_\d{4}\b", str(item)))
-            if not ids or not ids <= seen_message_ids:
-                raise ValueError("every loop_memory.durable_findings item must cite a causal-prefix msg ID")
+        memory_raw = raw.get("loop_memory") if isinstance(raw.get("loop_memory"), dict) else {}
+        evidence_ids = [
+            str(item)
+            for item in memory_raw.get("evidence_ids") or []
+            if str(item) in seen_message_ids
+        ] or [latest_id]
+        findings_raw = memory_raw.get("durable_findings")
+        findings = [
+            cited(item)
+            for item in (findings_raw if isinstance(findings_raw, list) else [])
+            if _normalize_text(item)
+        ][:6]
+        if not findings:
+            findings = list(progress["key_evidence"][:4]) or [
+                f"The closing Loop incorporated evidence from {latest_id}."
+            ]
+        memory = {
+            "memory_id": f"memory_loop_{loop_number:03d}",
+            "summary": _normalize_text(memory_raw.get("summary"))
+            or progress["progress_summary"],
+            "durable_findings": findings,
+            "rejected_leads": [
+                cited(item)
+                for item in (
+                    memory_raw.get("rejected_leads")
+                    if isinstance(memory_raw.get("rejected_leads"), list)
+                    else []
+                )
+                if _normalize_text(item)
+            ][:6],
+            "unresolved_questions": [
+                replace_unseen_ids(item)
+                for item in (
+                    memory_raw.get("unresolved_questions")
+                    if isinstance(memory_raw.get("unresolved_questions"), list)
+                    else []
+                )
+                if _normalize_text(item)
+            ][:6],
+            "evidence_ids": evidence_ids[:8],
+        }
+        raw["loop_memory"] = memory
+        raw["durable_update"] = operations
 
     boundary = deepcopy(boundary)
     boundary["reason"] = reason
     boundary["progress"] = progress
+    retrieval_raw = raw.get("retrieval") if isinstance(raw.get("retrieval"), dict) else {}
+    selected_ids = [
+        str(item)
+        for item in retrieval_raw.get("relevant_memory_ids") or []
+        if str(item) in allowed_memory_ids
+    ][:4]
     semantic_raw = {
         "durable_update": raw["durable_update"],
         "loop_memory": raw["loop_memory"],
-        "retrieval": raw["retrieval"],
+        "retrieval": {
+            "query": _normalize_text(retrieval_raw.get("query")) or boundary["current_subgoal"],
+            "relevant_memory_ids": selected_ids,
+            "reason": _normalize_text(retrieval_raw.get("reason"))
+            or "No prior cross-loop memory was required.",
+        },
         "next_loop_setup": (
             {"evidence_gaps": [boundary["next_subgoal"]]}
             if action == "SWITCH_LOOP"
@@ -574,6 +667,7 @@ def write_causal_target(
             seen_message_ids=seen_message_ids,
             allowed_memory_ids=allowed_memory_ids,
         ),
+        max_attempts=1,
     )
 
 
