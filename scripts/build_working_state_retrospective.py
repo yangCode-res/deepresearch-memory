@@ -63,6 +63,11 @@ Loop. Mark CONTINUE when the following agent work continues the same information
 when the following agent work pursues a genuinely different, independently decidable dependency. Mark READY
 only when the following agent content transitions to the final answer without another research tool call.
 
+A completed source/entity localization stage followed by extraction of the requested fact from that identified
+artifact IS a Loop boundary: locating the correct artifact and establishing the requested fact are separately
+decidable dependencies. In contrast, once a fact-extraction or verification objective is active, opening another
+source or repeating the same verification remains inside that Loop unless a different factual dependency begins.
+
 Do not label an earlier point READY merely because hindsight reveals that its evidence could have been enough.
 If the recorded agent performs later verification of the same claim, those decisions remain in the same Loop.
 
@@ -770,6 +775,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-glob", required=True)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--num-samples", type=int, default=20)
+    parser.add_argument("--target-trajectories", type=int, default=0)
+    parser.add_argument("--min-loops-per-trajectory", type=int, default=1)
+    parser.add_argument("--min-continues-per-trajectory", type=int, default=0)
+    parser.add_argument("--unique-qids", action="store_true")
     parser.add_argument("--min-decision-points", type=int, default=3)
     parser.add_argument("--max-decision-points", type=int, default=10)
     parser.add_argument("--max-trajectory-chars", type=int, default=70000)
@@ -822,11 +831,24 @@ def main() -> None:
     skipped_chars = 0
     excluded_trailing = 0
     causal_violations: list[dict[str, Any]] = []
+    completed_trajectory_qids: list[str] = []
+    attempted_qids: set[str] = set()
+    skipped_by_loop_count = 0
+    skipped_by_continue_count = 0
+    target_mode = args.target_trajectories > 0
+
+    def target_reached() -> bool:
+        return (
+            len(completed_trajectory_qids) >= args.target_trajectories
+            if target_mode
+            else len(records) >= args.num_samples
+        )
 
     def checkpoint(extra: dict[str, Any] | None = None) -> None:
         payload: dict[str, Any] = {
             "generated_samples": len(records),
             "segmented_trajectories": len(segment_records),
+            "completed_trajectory_qids": completed_trajectory_qids,
             **_usage(segment_client, state_client),
         }
         if extra:
@@ -834,17 +856,21 @@ def main() -> None:
         partial_usage_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
     print(
-        f"[retrospective] model={args.model} target={args.num_samples} "
+        f"[retrospective] model={args.model} target_samples={args.num_samples} "
+        f"target_trajectories={args.target_trajectories} "
         f"trajectory_decisions={args.min_decision_points}..{args.max_decision_points}",
         flush=True,
     )
     with args.output.open("w", encoding="utf-8") as output, segment_path.open("w", encoding="utf-8") as segments_out:
         for row in iter_rows(paths, seed=args.seed):
-            if len(records) >= args.num_samples:
+            if target_reached():
                 break
             if str(row.get("status") or "").lower() not in {"success", "completed", "ok"}:
                 continue
             messages = row.get("messages") or []
+            qid = str(row.get("qid"))
+            if args.unique_qids and qid in attempted_qids:
+                continue
             steps = decision_steps(messages)
             if not (args.min_decision_points <= len(steps) <= args.max_decision_points):
                 skipped_length += 1
@@ -861,6 +887,8 @@ def main() -> None:
             if trajectory_chars > args.max_trajectory_chars:
                 skipped_chars += 1
                 continue
+            if args.unique_qids:
+                attempted_qids.add(qid)
             question = str(row.get("question") or "").strip()
             try:
                 segmentation = segment_trajectory(
@@ -883,7 +911,28 @@ def main() -> None:
 
             usable_end = int(segmentation["loops"][-1]["end_decision_index"])
             trailing = decision_count - usable_end - 1
-            excluded_trailing += trailing
+            loop_count = len(segmentation["loops"])
+            switch_count = max(0, loop_count - 1)
+            ready_count = int(segmentation["loops"][-1]["end_action"] == "READY_TO_ANSWER")
+            continue_count = decision_count - switch_count - ready_count
+            if loop_count < args.min_loops_per_trajectory:
+                skipped_by_loop_count += 1
+                checkpoint()
+                print(
+                    f"[retrospective] skip qid={row.get('qid')} loops={loop_count} "
+                    f"required={args.min_loops_per_trajectory}",
+                    flush=True,
+                )
+                continue
+            if continue_count < args.min_continues_per_trajectory:
+                skipped_by_continue_count += 1
+                checkpoint()
+                print(
+                    f"[retrospective] skip qid={row.get('qid')} continues={continue_count} "
+                    f"required={args.min_continues_per_trajectory}",
+                    flush=True,
+                )
+                continue
             segment_record = {
                 "source": {
                     "dataset": "OpenResearcher/OpenResearcher-Dataset",
@@ -897,9 +946,11 @@ def main() -> None:
                 "excluded_trailing_decisions": trailing,
                 "segmentation": segmentation,
             }
-            segment_records.append(segment_record)
-            segments_out.write(json.dumps(segment_record, ensure_ascii=False) + "\n")
-            segments_out.flush()
+            if not target_mode:
+                segment_records.append(segment_record)
+                segments_out.write(json.dumps(segment_record, ensure_ascii=False) + "\n")
+                segments_out.flush()
+                excluded_trailing += trailing
             checkpoint()
             print(
                 f"[retrospective] segmented qid={row.get('qid')} decisions={decision_count} "
@@ -912,8 +963,11 @@ def main() -> None:
             memories: list[dict[str, Any]] = []
             loop_number = 1
             current_loop_evidence_ids: set[str] = set()
+            trajectory_records: list[dict[str, Any]] = []
+            trajectory_failed = False
+            trajectory_reached_ready = False
             for decision_index, step in enumerate(steps[: usable_end + 1]):
-                if len(records) >= args.num_samples:
+                if not target_mode and len(records) >= args.num_samples:
                     break
                 observed_messages = compact_observed_messages(
                     step["observed_messages"], tool_limit=4000, assistant_limit=1200
@@ -948,9 +1002,14 @@ def main() -> None:
                         f"[retrospective] abandon qid={row.get('qid')} step={decision_index}: {exc}",
                         flush=True,
                     )
+                    trajectory_failed = True
                     break
                 record = {
-                    "sample_id": f"ws_retro_{len(records) + 1:04d}",
+                    "sample_id": (
+                        f"ws_retro_pending_{len(trajectory_records) + 1:04d}"
+                        if target_mode
+                        else f"ws_retro_{len(records) + 1:04d}"
+                    ),
                     "source": {
                         "dataset": "OpenResearcher/OpenResearcher-Dataset",
                         "qid": row.get("qid"),
@@ -975,7 +1034,8 @@ def main() -> None:
                 }
                 violations = audit_record_causality(record)
                 if violations:
-                    causal_violations.append({"sample_id": record["sample_id"], "errors": violations})
+                    if not target_mode:
+                        causal_violations.append({"sample_id": record["sample_id"], "errors": violations})
                     errors.append(
                         {
                             "stage": "causality_audit",
@@ -985,13 +1045,17 @@ def main() -> None:
                         }
                     )
                     print(f"[retrospective] reject causal leakage {record['sample_id']}: {violations}", flush=True)
+                    trajectory_failed = True
                     break
 
-                output.write(json.dumps(record, ensure_ascii=False) + "\n")
-                output.flush()
-                records.append(record)
                 action = target["loop_decision"]["action"]
-                action_counts[action] += 1
+                if target_mode:
+                    trajectory_records.append(record)
+                else:
+                    output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    output.flush()
+                    records.append(record)
+                    action_counts[action] += 1
                 global_state = apply_delta(global_state, target["state_delta"]["operations"])
                 memory = target["cross_loop_memory"]
                 if isinstance(memory, dict):
@@ -1002,18 +1066,54 @@ def main() -> None:
                     current_loop_evidence_ids = set()
                 checkpoint()
                 print(
-                    f"[retrospective] saved={len(records)}/{args.num_samples} qid={row.get('qid')} "
+                    f"[retrospective] {'buffered' if target_mode else 'saved'}="
+                    f"{len(trajectory_records) if target_mode else len(records)} "
+                    f"qid={row.get('qid')} "
                     f"step={decision_index} loop={loop_number} action={action}",
                     flush=True,
                 )
                 if action == "READY_TO_ANSWER":
+                    trajectory_reached_ready = True
                     break
+
+            if target_mode:
+                trajectory_complete = (
+                    not trajectory_failed
+                    and trajectory_reached_ready
+                    and len(trajectory_records) == usable_end + 1
+                )
+                if not trajectory_complete:
+                    print(
+                        f"[retrospective] discard incomplete replay qid={row.get('qid')} "
+                        f"buffered={len(trajectory_records)}/{usable_end + 1}",
+                        flush=True,
+                    )
+                    continue
+                for record in trajectory_records:
+                    record["sample_id"] = f"ws_retro_{len(records) + 1:04d}"
+                    output.write(json.dumps(record, ensure_ascii=False) + "\n")
+                    records.append(record)
+                    action_counts[record["target"]["loop_decision"]["action"]] += 1
+                output.flush()
+                segment_records.append(segment_record)
+                segments_out.write(json.dumps(segment_record, ensure_ascii=False) + "\n")
+                segments_out.flush()
+                excluded_trailing += trailing
+                completed_trajectory_qids.append(qid)
+                checkpoint()
+                print(
+                    f"[retrospective] committed trajectory {len(completed_trajectory_qids)}/"
+                    f"{args.target_trajectories} qid={row.get('qid')} samples={len(trajectory_records)}",
+                    flush=True,
+                )
 
     preview = args.output.with_suffix(".preview.md")
     write_preview(preview, records, count=args.preview_count)
     loop_counts = [len(item["segmentation"]["loops"]) for item in segment_records]
     report = {
         "requested_samples": args.num_samples,
+        "requested_trajectories": args.target_trajectories,
+        "completed_trajectory_qids": completed_trajectory_qids,
         "valid_samples": len(records),
         "action_counts": action_counts,
         "unique_questions": len({str(record["source"]["qid"]) for record in records}),
@@ -1028,6 +1128,8 @@ def main() -> None:
         "error_examples": errors[:20],
         "skipped_by_decision_length": skipped_length,
         "skipped_by_character_budget": skipped_chars,
+        "skipped_by_loop_count": skipped_by_loop_count,
+        "skipped_by_continue_count": skipped_by_continue_count,
         "model": args.model,
         **_usage(segment_client, state_client),
         "output": str(args.output),
@@ -1037,10 +1139,16 @@ def main() -> None:
     args.output.with_suffix(".report.json").write_text(
         json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
     )
-    checkpoint({"complete": len(records) == args.num_samples})
+    complete = target_reached()
+    checkpoint({"complete": complete})
     print(json.dumps(report, ensure_ascii=False, indent=2), flush=True)
-    if len(records) != args.num_samples or causal_violations:
-        raise SystemExit(f"generated {len(records)}/{args.num_samples} valid causal samples")
+    if not complete or causal_violations:
+        expected = (
+            f"{args.target_trajectories} trajectories"
+            if target_mode
+            else f"{args.num_samples} samples"
+        )
+        raise SystemExit(f"generated {len(records)} samples but did not complete {expected}")
 
 
 if __name__ == "__main__":
