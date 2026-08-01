@@ -492,6 +492,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ready-target", type=int, default=4)
     parser.add_argument("--max-steps-per-trajectory", type=int, default=40)
     parser.add_argument("--max-trajectory-decision-points", type=int, default=12)
+    parser.add_argument("--min-trajectory-decision-points", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260801)
     parser.add_argument("--model", default=os.getenv("CL_GISM_DATA_MODEL", "mimo-v2.5"))
     parser.add_argument("--base-url", default=os.getenv("CL_GISM_CONTROLLER_BASE_URL"))
@@ -544,6 +545,8 @@ def main() -> None:
                 continue
             steps = decision_steps(row.get("messages") or [])[: args.max_steps_per_trajectory]
             if not steps:
+                continue
+            if len(steps) < args.min_trajectory_decision_points:
                 continue
             if len(steps) > args.max_trajectory_decision_points:
                 skipped_long_trajectories += 1
