@@ -27,6 +27,19 @@ def sample(step: int, action: str, *, memories: list[str] | None = None):
 
 
 class RetrospectiveCuratorTest(unittest.TestCase):
+    def test_completion_is_derived_from_specific_subgoal(self):
+        self.assertEqual(
+            MODULE.completion_from_subgoal("Identify the requested founding year"),
+            "Evidence is sufficient to identify the requested founding year",
+        )
+
+    def test_contract_normalizer_keeps_website_as_answer_type(self):
+        value = "Identify which website matches the described research-library features"
+        self.assertEqual(
+            MODULE.normalize_curated_contract(value, fallback="generic fallback"),
+            value,
+        )
+
     def test_choose_four_covers_both_sides_of_boundary(self):
         group = [
             sample(0, "CONTINUE_CURRENT_LOOP"),
@@ -125,6 +138,10 @@ class RetrospectiveCuratorTest(unittest.TestCase):
 
         rendered = str(rows[0]["target"]["working_state_after"])
         self.assertFalse(MODULE.GLOBAL_CONCRETE_PATTERN.search(rendered))
+        self.assertEqual(
+            rows[0]["target"]["loop_decision"]["current_subgoal"],
+            "Establish evidence that the requested fact",
+        )
         self.assertEqual(
             rows[0]["target"]["working_state_after"],
             rows[1]["input"]["working_state_before"],

@@ -153,6 +153,29 @@ GLOBAL_CONCRETE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+DURABLE_OPERATION_PATTERN = re.compile(
+    r"https?://|\bbrowser\.|\bdoc\s*\d+\b|\bsearch\s+results?\b|"
+    r"\bopened?\s+in\s+(?:the\s+)?browser\b|\bnext\s+step\b",
+    re.IGNORECASE,
+)
+
+GENERIC_CONTRACT_PATTERN = re.compile(
+    r"\binformation dependency\s*\d*\b|\bevidence resolves\b",
+    re.IGNORECASE,
+)
+
+VERIFICATION_ONLY_SUBGOAL_PATTERN = re.compile(
+    r"^(?:(?:independently|additionally)\s+)?"
+    r"(?:verify|confirm|corroborate|validate|double-check|ensure)\b",
+    re.IGNORECASE,
+)
+
+VERIFICATION_ONLY_QUALIFIER_PATTERN = re.compile(
+    r"\b(?:sources?|references?|corroborat\w*|consisten\w*|accurac\w*|"
+    r"same\s+(?:claim|answer|fact)|only\s+relevant\s+mention|re-?check\w*)\b",
+    re.IGNORECASE,
+)
+
 
 def sanitize_contract_text(value: Any, *, fallback: str) -> str:
     """Convert tool/source phrasing into an information-objective contract."""
@@ -231,7 +254,7 @@ def subgoal_fallback(question: str, loop_number: int) -> str:
         question,
         flags=re.IGNORECASE,
     ):
-        return "Identify the referenced artifact and the passage needed to resolve the user's requested fact"
+        return "Identify and access the specific artifact referenced by the user"
     return f"Establish information dependency {loop_number} required by the user question"
 
 
@@ -241,7 +264,7 @@ def completion_fallback(question: str, loop_number: int) -> str:
         question,
         flags=re.IGNORECASE,
     ):
-        return "The referenced artifact and relevant passage are identified in the observed evidence"
+        return "The referenced artifact is uniquely identified and accessible in the observed evidence"
     return f"Evidence resolves information dependency {loop_number}"
 
 
@@ -333,6 +356,8 @@ def validate_segmentation(
         reason = _normalize_text(item["boundary_reason"])
         if not subgoal or not completion_test or not reason:
             raise ValueError("Loop contract and boundary reason cannot be empty")
+        if GENERIC_CONTRACT_PATTERN.search(f"{subgoal}\n{completion_test}"):
+            raise ValueError("Loop contracts must name the specific information objective")
         action = str(item["end_action"] or "").upper()
         outcome = str(item["outcome"] or "").upper()
         basis = str(item["boundary_basis"] or "").upper()
@@ -375,6 +400,13 @@ def validate_segmentation(
     if has_final_answer is False and final["end_action"] == "READY_TO_ANSWER":
         raise ValueError("READY requires a following final-answer transition")
     for left, right in zip(normalized, normalized[1:]):
+        if (
+            VERIFICATION_ONLY_SUBGOAL_PATTERN.search(right["subgoal"])
+            and VERIFICATION_ONLY_QUALIFIER_PATTERN.search(right["subgoal"])
+        ):
+            raise ValueError(
+                "same-claim verification must remain in the preceding Loop rather than form a new Loop"
+            )
         if semantic_similarity(left["subgoal"], right["subgoal"]) >= 0.72:
             raise ValueError("adjacent Loops appear to be source/query rephrasings of the same subgoal")
 
@@ -666,6 +698,12 @@ def validate_causal_raw(
         raw["durable_update"] = operations
         raw["loop_memory"] = None
     else:
+        operations["completed_subgoal"] = boundary["current_subgoal"]
+        operations["add_confirmed_facts"] = [
+            item
+            for item in operations["add_confirmed_facts"]
+            if not DURABLE_OPERATION_PATTERN.search(item)
+        ]
         memory_raw = raw.get("loop_memory") if isinstance(raw.get("loop_memory"), dict) else {}
         evidence_ids = [
             str(item)
@@ -742,7 +780,28 @@ def validate_causal_raw(
         seen_message_ids=seen_message_ids,
         allowed_memory_ids=allowed_memory_ids,
     )
+    if action != "CONTINUE_CURRENT_LOOP":
+        target["state_delta"]["summary"] = summarize_delta(
+            target["state_delta"]["operations"]
+        )
     return target
+
+
+def summarize_delta(operations: dict[str, Any]) -> str:
+    parts: list[str] = []
+    completed = _normalize_text(operations.get("completed_subgoal"))
+    if completed:
+        parts.append(f"Completed subgoal: {completed}.")
+    confirmed = operations.get("add_confirmed_facts") or []
+    if confirmed:
+        parts.append("Confirmed: " + " ".join(str(item) for item in confirmed[:2]))
+    rejected = operations.get("add_rejected_hypotheses") or []
+    if rejected:
+        parts.append("Rejected: " + " ".join(str(item) for item in rejected[:2]))
+    open_questions = operations.get("add_open_questions") or []
+    if open_questions:
+        parts.append("Open: " + " ".join(str(item) for item in open_questions[:2]))
+    return _normalize_text(" ".join(parts))
 
 
 def causal_teacher_payload(

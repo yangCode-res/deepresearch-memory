@@ -156,6 +156,56 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "non-final Loop"):
             MODULE.validate_segmentation(raw, decision_count=2, has_final_answer=True)
 
+    def test_segmentation_rejects_generic_loop_contract(self):
+        raw = {
+            "trajectory_summary": "generic placeholder",
+            "loops": [
+                loop_record(
+                    1,
+                    0,
+                    0,
+                    "READY_TO_ANSWER",
+                    subgoal="Establish information dependency 1 required by the user question",
+                )
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "specific information objective"):
+            MODULE.validate_segmentation(raw, decision_count=1, has_final_answer=True)
+
+    def test_segmentation_rejects_same_claim_verification_loop(self):
+        raw = {
+            "trajectory_summary": "find the date and then recheck the same date",
+            "loops": [
+                loop_record(1, 0, 0, "SWITCH_LOOP", subgoal="Identify the requested death date"),
+                loop_record(
+                    2,
+                    1,
+                    1,
+                    "READY_TO_ANSWER",
+                    subgoal="Verify the requested death date with another reference",
+                ),
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "same-claim verification"):
+            MODULE.validate_segmentation(raw, decision_count=2, has_final_answer=True)
+
+    def test_segmentation_allows_verification_of_a_distinct_relation(self):
+        raw = {
+            "trajectory_summary": "identify the officeholder and then establish the role relation",
+            "loops": [
+                loop_record(1, 0, 0, "SWITCH_LOOP", subgoal="Identify the officeholder"),
+                loop_record(
+                    2,
+                    1,
+                    1,
+                    "READY_TO_ANSWER",
+                    subgoal="Confirm that the identified officeholder is the principal leader of the church",
+                ),
+            ],
+        }
+        segmented = MODULE.validate_segmentation(raw, decision_count=2, has_final_answer=True)
+        self.assertEqual(len(segmented["loops"]), 2)
+
     def test_segmentation_normalizes_action_dependent_enums(self):
         raw = {
             "trajectory_summary": "answer becomes available immediately",
@@ -176,7 +226,7 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         self.assertEqual(item["outcome"], "RESOLVED")
         self.assertEqual(item["boundary_basis"], "TASK_COMPLETE")
 
-    def test_segmentation_scrubs_future_literals_and_embedded_tool_actions(self):
+    def test_segmentation_scrubs_future_literals(self):
         raw = {
             "trajectory_summary": "locate the article and then verify its answer",
             "loops": [
@@ -186,12 +236,12 @@ class RetrospectiveBuilderTest(unittest.TestCase):
                     1,
                     1,
                     "READY_TO_ANSWER",
-                    subgoal="Verify the extracted months by searching within the article page",
+                    subgoal="Extract the requested survey months from the identified article",
                 ),
             ],
         }
         raw["loops"][1]["completion_test"] = (
-            "The 'May and June 2020' text is re-verified by opening the page again"
+            "The 'May and June 2020' text is directly supported by evidence"
         )
         segmented = MODULE.validate_segmentation(
             raw,
@@ -238,8 +288,8 @@ class RetrospectiveBuilderTest(unittest.TestCase):
 
     def test_artifact_question_gets_specific_fallback_contract(self):
         question = "According to the study, on what date did the event occur?"
-        self.assertIn("referenced artifact", MODULE.subgoal_fallback(question, 1))
-        self.assertIn("relevant passage", MODULE.completion_fallback(question, 1))
+        self.assertIn("specific artifact", MODULE.subgoal_fallback(question, 1))
+        self.assertIn("uniquely identified", MODULE.completion_fallback(question, 1))
 
     def test_future_percentage_is_not_masked_by_visible_line_numbers(self):
         visible = "L15: the target article is available"

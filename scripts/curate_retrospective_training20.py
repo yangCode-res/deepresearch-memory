@@ -8,6 +8,7 @@ from collections import Counter, defaultdict
 from copy import deepcopy
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any
 
@@ -20,6 +21,7 @@ for path in (str(ROOT / "src"), str(SCRIPT_DIR)):
 
 from build_working_state_dataset import apply_delta, validate_label, write_preview  # noqa: E402
 from build_working_state_retrospective import (  # noqa: E402
+    DURABLE_OPERATION_PATTERN,
     GLOBAL_CONCRETE_PATTERN,
     audit_record_causality,
     boundary_for_decision,
@@ -27,13 +29,41 @@ from build_working_state_retrospective import (  # noqa: E402
     sanitize_contract_text,
     scrub_future_literals,
     subgoal_fallback,
+    summarize_delta,
 )
+
+
+CURATION_OPERATION_PATTERN = re.compile(
+    r"https?://|\b[a-z0-9-]+\.(?:com|org|net|edu|gov|io|ai|co|uk)\b|\bbrowser\.|"
+    r"\b(?:search|query|open|view|visit|click|browse|"
+    r"url|webpage|wikipedia|google|bing|source|search\s+result|snippet|doc\s*\d+)\b",
+    re.IGNORECASE,
+)
+
+GENERIC_COMPLETION_PATTERN = re.compile(
+    r"\bevidence resolves\b|\binformation dependency\s*\d*\b",
+    re.IGNORECASE,
+)
+
+
+def normalize_curated_contract(value: Any, *, fallback: str) -> str:
+    """Sanitize operations while retaining answer types such as 'website'."""
+
+    raw = " ".join(str(value or "").strip().split()).rstrip(" .;；。")
+    cleaned = sanitize_contract_text(raw, fallback=fallback)
+    if raw and cleaned == fallback and not CURATION_OPERATION_PATTERN.search(raw):
+        return raw
+    return cleaned
+
+
+def completion_from_subgoal(subgoal: str) -> str:
+    return f"Evidence is sufficient to {subgoal[:1].lower() + subgoal[1:]}"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--pool", required=True, type=Path)
-    parser.add_argument("--segments", required=True, type=Path)
+    parser.add_argument("--pool", action="append", required=True, type=Path)
+    parser.add_argument("--segments", action="append", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--questions", type=int, default=5)
     parser.add_argument("--min-positive-retrieval", type=int, default=3)
@@ -68,18 +98,33 @@ def normalize_directional_contracts(
                 goal_fallback = subgoal_fallback(question, loop_number)
                 test_fallback = completion_fallback(question, loop_number)
                 raw_goal = str(loop.get("subgoal") or "")
-                loop["subgoal"] = sanitize_contract_text(raw_goal, fallback=goal_fallback)
+                loop["subgoal"] = normalize_curated_contract(raw_goal, fallback=goal_fallback)
                 if raw_goal.startswith("Establish information dependency"):
                     loop["subgoal"] = goal_fallback
-                loop["completion_test"] = sanitize_contract_text(
+                loop["completion_test"] = normalize_curated_contract(
                     loop["completion_test"], fallback=test_fallback
                 )
+                if GENERIC_COMPLETION_PATTERN.search(loop["completion_test"]):
+                    loop["completion_test"] = completion_from_subgoal(loop["subgoal"])
         group.sort(key=lambda item: int(item["source"]["step_index"]))
         previous_after: dict[str, Any] | None = None
+        current_global = (
+            deepcopy(group[0]["input"].get("global_intent_state_before"))
+            if group
+            else None
+        )
         activation_visible: dict[int, str] = {}
+        loop_contracts = {
+            int(loop.get("loop_number") or index): loop
+            for index, loop in enumerate(
+                (segment_record or {}).get("segmentation", {}).get("loops", []), start=1
+            )
+        }
         for row in group:
             if previous_after is not None:
                 row["input"]["working_state_before"] = deepcopy(previous_after)
+            if current_global is not None:
+                row["input"]["global_intent_state_before"] = deepcopy(current_global)
             visible_text = "\n".join(
                 [
                     question,
@@ -94,8 +139,11 @@ def normalize_directional_contracts(
             current_loop_number = int(str(row["input"]["working_state_before"]["loop_id"]).rsplit("_", 1)[-1])
             activation_visible.setdefault(current_loop_number, visible_text)
             current_fallback = subgoal_fallback(question, current_loop_number)
-            current_raw = str(decision.get("current_subgoal") or "")
-            decision["current_subgoal"] = sanitize_contract_text(current_raw, fallback=current_fallback)
+            current_contract = loop_contracts.get(current_loop_number, {})
+            current_raw = str(current_contract.get("subgoal") or decision.get("current_subgoal") or "")
+            decision["current_subgoal"] = normalize_curated_contract(
+                current_raw, fallback=current_fallback
+            )
             if current_raw.startswith("Establish information dependency"):
                 decision["current_subgoal"] = current_fallback
             decision["current_subgoal"] = scrub_future_literals(
@@ -103,23 +151,27 @@ def normalize_directional_contracts(
                 visible_text=activation_visible[current_loop_number],
             )
             if decision.get("next_subgoal"):
-                decision["next_subgoal"] = sanitize_contract_text(
-                    decision["next_subgoal"],
+                next_contract = loop_contracts.get(current_loop_number + 1, {})
+                decision["next_subgoal"] = normalize_curated_contract(
+                    next_contract.get("subgoal") or decision["next_subgoal"],
                     fallback="Establish the next distinct information dependency required by the user question",
                 )
             after = target["working_state_after"]
             after_loop_number = int(str(after["loop_id"]).rsplit("_", 1)[-1])
             activation_visible.setdefault(after_loop_number, visible_text)
             after_fallback = subgoal_fallback(question, after_loop_number)
-            after_raw = str(after.get("current_subgoal") or "")
-            after["current_subgoal"] = sanitize_contract_text(after_raw, fallback=after_fallback)
+            after_contract = loop_contracts.get(after_loop_number, {})
+            after_raw = str(after_contract.get("subgoal") or after.get("current_subgoal") or "")
+            after["current_subgoal"] = normalize_curated_contract(
+                after_raw, fallback=after_fallback
+            )
             if after_raw.startswith("Establish information dependency"):
                 after["current_subgoal"] = after_fallback
             after["current_subgoal"] = scrub_future_literals(
                 after["current_subgoal"], visible_text=activation_visible[after_loop_number]
             )
-            after["completion_test"] = sanitize_contract_text(
-                after.get("completion_test"),
+            after["completion_test"] = normalize_curated_contract(
+                after_contract.get("completion_test") or after.get("completion_test"),
                 fallback=completion_fallback(question, after_loop_number),
             )
             after["completion_test"] = scrub_future_literals(
@@ -140,6 +192,19 @@ def normalize_directional_contracts(
             after["next_direction"] = (
                 f"Objective: {after['current_subgoal']}. Stop when: {after['completion_test']}."
             )
+            action = str(decision.get("action") or "")
+            delta = target.get("state_delta") if isinstance(target.get("state_delta"), dict) else {}
+            operations = delta.get("operations") if isinstance(delta.get("operations"), dict) else None
+            if operations is not None and action != "CONTINUE_CURRENT_LOOP":
+                operations["completed_subgoal"] = decision["current_subgoal"]
+                operations["add_confirmed_facts"] = [
+                    item
+                    for item in operations.get("add_confirmed_facts") or []
+                    if not DURABLE_OPERATION_PATTERN.search(str(item))
+                ]
+                delta["summary"] = summarize_delta(operations)
+            if current_global is not None and operations is not None:
+                current_global = apply_delta(current_global, operations)
             previous_after = after
 
 
@@ -208,7 +273,7 @@ def validate_pool(
                     *[str(value) for value in target["working_state_after"].get("evidence_gaps") or []],
                 ]
             )
-            if GLOBAL_CONCRETE_PATTERN.search(directional_text):
+            if CURATION_OPERATION_PATTERN.search(directional_text):
                 violations.append(
                     {"qid": qid, "step": step, "error": "tool/source/domain text in directional contract"}
                 )
@@ -287,8 +352,16 @@ def positive_retrieval_after_switch(group: list[dict[str, Any]]) -> bool:
 
 def main() -> None:
     args = parse_args()
-    pool = read_jsonl(args.pool)
-    segments = read_jsonl(args.segments)
+    pool_by_source: dict[tuple[str, int], dict[str, Any]] = {}
+    for path in args.pool:
+        for row in read_jsonl(path):
+            pool_by_source[(qid_of(row), int(row["source"]["step_index"]))] = row
+    segment_by_qid: dict[str, dict[str, Any]] = {}
+    for path in args.segments:
+        for row in read_jsonl(path):
+            segment_by_qid[qid_of(row)] = row
+    pool = list(pool_by_source.values())
+    segments = list(segment_by_qid.values())
     grouped, segment_map, violations = validate_pool(pool, segments)
     invalid_qids = {str(item["qid"]) for item in violations if item.get("qid") is not None}
     global_violations = [item for item in violations if item.get("qid") is None]
@@ -343,15 +416,19 @@ def main() -> None:
         if row["source"]["selection_role"] == "continue_after_switch"
     )
     selection_violations: list[str] = []
-    if len(selected) != 20:
-        selection_violations.append("selection does not contain exactly 20 samples")
-    if dict(action_counts) != {
-        "CONTINUE_CURRENT_LOOP": 10,
-        "SWITCH_LOOP": 5,
-        "READY_TO_ANSWER": 5,
-    }:
+    expected_samples = args.questions * 4
+    expected_actions = {
+        "CONTINUE_CURRENT_LOOP": args.questions * 2,
+        "SWITCH_LOOP": args.questions,
+        "READY_TO_ANSWER": args.questions,
+    }
+    if len(selected) != expected_samples:
+        selection_violations.append(
+            f"selection does not contain exactly {expected_samples} samples"
+        )
+    if dict(action_counts) != expected_actions:
         selection_violations.append(f"unexpected action distribution: {dict(action_counts)}")
-    if set(per_qid.values()) != {4} or len(per_qid) != 5:
+    if set(per_qid.values()) != {4} or len(per_qid) != args.questions:
         selection_violations.append(f"unexpected per-question distribution: {dict(per_qid)}")
     if positive_retrieval < args.min_positive_retrieval:
         selection_violations.append(
