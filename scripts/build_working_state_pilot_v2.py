@@ -181,6 +181,13 @@ def validate_boundary(
     if gain not in GAIN_LEVELS:
         raise ValueError("boundary progress has invalid expected_information_gain")
     progress["expected_information_gain"] = gain
+    if (
+        action == "CONTINUE_CURRENT_LOOP"
+        and progress["answer_stable"]
+        and progress["evidence_sufficient"]
+        and gain == "LOW"
+    ):
+        action = "READY_TO_ANSWER"
     outcome = str(raw["outcome"] or "").upper()
     basis = str(raw["boundary_basis"] or "").upper()
     # action is the learned judgment; dependent enum fields are mechanical.
@@ -606,6 +613,23 @@ def main() -> None:
         timeout_seconds=300,
         max_tokens=3072,
     )
+
+    def checkpoint_usage() -> None:
+        args.output.with_suffix(".usage.partial.json").write_text(
+            json.dumps(
+                {
+                    "processed_decision_points": processed,
+                    "api_requests": boundary_client.request_count + state_client.request_count,
+                    "prompt_tokens": boundary_client.total_prompt_tokens + state_client.total_prompt_tokens,
+                    "completion_tokens": (
+                        boundary_client.total_completion_tokens + state_client.total_completion_tokens
+                    ),
+                    "total_tokens": boundary_client.total_tokens + state_client.total_tokens,
+                },
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
     print(f"[pilot-v2] model={args.model} quotas={quotas}", flush=True)
     with args.output.open("w", encoding="utf-8") as output:
         for row in iter_rows(paths, seed=args.seed):
@@ -673,9 +697,11 @@ def main() -> None:
                             seen_message_ids=seen_ids,
                         )
                 except Exception as exc:
+                    checkpoint_usage()
                     errors.append({"qid": row.get("qid"), "step": step["step_index"], "error": str(exc)})
                     print(f"[pilot-v2] abandon qid={row.get('qid')} step={step['step_index']}: {exc}", flush=True)
                     break
+                checkpoint_usage()
                 action = boundary["action"]
                 if counts[action] < quotas[action]:
                     record = {

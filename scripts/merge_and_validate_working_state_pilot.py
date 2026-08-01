@@ -82,6 +82,15 @@ def main() -> None:
             if before["current_subgoal"] != target["working_state_after"]["current_subgoal"]:
                 subgoal_drift += 1
                 violations.append({"sample": row["sample_id"], "error": "subgoal drift under CONTINUE"})
+        working_after = target["working_state_after"]
+        if action == "CONTINUE_CURRENT_LOOP" and (
+            working_after.get("answer_stable") is True
+            and working_after.get("evidence_sufficient") is True
+            and working_after.get("expected_information_gain") == "LOW"
+        ):
+            violations.append(
+                {"sample": row["sample_id"], "error": "CONTINUE despite terminal-ready state"}
+            )
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
