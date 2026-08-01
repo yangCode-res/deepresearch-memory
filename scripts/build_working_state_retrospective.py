@@ -70,7 +70,9 @@ Decision indices refer only to tool-result messages marked with decision_index. 
 that start at decision 0, cover every decision exactly once, and never overlap. Every non-final Loop ends with
 SWITCH_LOOP; the final Loop ends with READY_TO_ANSWER when the recorded trajectory transitions to a final answer.
 Subgoals and completion tests must describe information outcomes; never name a website, URL, query, browser
-operation, or tool. The ranges are retrospective annotations kept outside model-training input."""
+operation, or tool. A Loop contract must not contain an answer value, date, number, name, or quoted phrase that
+first appears in a later tool result; describe the unknown information to establish instead. The ranges are
+retrospective annotations kept outside model-training input."""
 
 
 CAUSAL_STATE_SYSTEM_PROMPT = """You create a causal Working-State label at one fixed decision point.
@@ -136,6 +138,14 @@ def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
 
 
+GLOBAL_CONCRETE_PATTERN = re.compile(
+    r"https?://|\b(browser\.(?:search|open)|wikipedia|google|bing|search(?:ing)?|query(?:ing)?|"
+    r"open(?:ing)?|view(?:ing)?|visit(?:ing)?|browse|click(?:ing)?|read(?:ing)?|inspect(?:ing)?|"
+    r"look(?:ing)?\s+up)\b|搜索|查询|查找|打开|查看|访问|点击",
+    re.IGNORECASE,
+)
+
+
 def sanitize_contract_text(value: Any, *, fallback: str) -> str:
     """Convert tool/source phrasing into an information-objective contract."""
 
@@ -156,7 +166,41 @@ def sanitize_contract_text(value: Any, *, fallback: str) -> str:
     )
     text = re.sub(r"(^|[。！？；]\s*)(搜索|查询|查找|打开|查看|访问|点击)", r"\1确定", text)
     text = _normalize_text(text)
-    return fallback if not text or CONCRETE_ACTION_PATTERN.search(text) else text
+    return fallback if not text or GLOBAL_CONCRETE_PATTERN.search(text) else text
+
+
+def scrub_future_literals(value: str, *, visible_text: str) -> str:
+    """Remove answer-like literals unavailable when a Loop contract becomes active."""
+
+    visible = visible_text.casefold()
+    text = value
+
+    def scrub_quote(match: re.Match[str]) -> str:
+        phrase = _normalize_text(match.group(2))
+        return match.group(0) if phrase.casefold() in visible else "the requested value"
+
+    text = re.sub(r"(['\"])([^'\"]{3,80})\1", scrub_quote, text)
+    month = (
+        r"(?:January|February|March|April|May|June|July|August|September|October|November|December)"
+    )
+
+    def scrub_date(match: re.Match[str]) -> str:
+        phrase = _normalize_text(match.group(0))
+        return phrase if phrase.casefold() in visible else "the requested date or period"
+
+    text = re.sub(
+        rf"\b{month}(?:\s+(?:and|to|through|[-–])\s+{month})?(?:\s+\d{{4}})?\b",
+        scrub_date,
+        text,
+        flags=re.IGNORECASE,
+    )
+
+    def scrub_number(match: re.Match[str]) -> str:
+        token = match.group(0)
+        return token if token.casefold() in visible else "the requested value"
+
+    text = re.sub(r"\b\d[\d,.:%-]*\b", scrub_number, text)
+    return _normalize_text(text)
 
 
 def validate_segmentation(
@@ -166,6 +210,8 @@ def validate_segmentation(
     decision_message_limits: list[int] | None = None,
     trajectory_message_limit: int | None = None,
     has_final_answer: bool | None = None,
+    question: str = "",
+    trajectory_messages: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != SEGMENTATION_KEYS:
         raise ValueError("segmentation response has missing or extra fields")
@@ -199,6 +245,15 @@ def validate_segmentation(
             item["completion_test"],
             fallback=f"Evidence resolves information dependency {loop_number}",
         )
+        if decision_message_limits is not None:
+            visible_end = decision_message_limits[0 if start == 0 else start - 1]
+            visible_parts = [question]
+            for message in trajectory_messages or []:
+                if int(message.get("index") or 0) <= visible_end:
+                    visible_parts.append(str(message.get("text") or ""))
+            visible_text = "\n".join(visible_parts)
+            subgoal = scrub_future_literals(subgoal, visible_text=visible_text)
+            completion_test = scrub_future_literals(completion_test, visible_text=visible_text)
         reason = _normalize_text(item["boundary_reason"])
         if not subgoal or not completion_test or not reason:
             raise ValueError("Loop contract and boundary reason cannot be empty")
@@ -357,6 +412,8 @@ def segment_trajectory(
             decision_message_limits=decision_message_limits,
             trajectory_message_limit=max((int(item["index"]) for item in messages), default=None),
             has_final_answer=has_final_answer,
+            question=question,
+            trajectory_messages=messages,
         ),
     )
 
@@ -432,9 +489,7 @@ def validate_causal_raw(
         "SWITCH_LOOP": "The current information subgoal ends before a distinct dependency begins.",
         "READY_TO_ANSWER": "The recorded trajectory transitions from research to the final answer.",
     }
-    reason = _normalize_text(raw.get("decision_reason"))
-    if not reason or CONCRETE_ACTION_PATTERN.search(reason):
-        reason = default_reasons[action]
+    reason = default_reasons[action]
 
     latest_id = max(seen_message_ids) if seen_message_ids else "msg_0000"
 

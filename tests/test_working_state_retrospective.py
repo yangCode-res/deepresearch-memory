@@ -176,6 +176,40 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         self.assertEqual(item["outcome"], "RESOLVED")
         self.assertEqual(item["boundary_basis"], "TASK_COMPLETE")
 
+    def test_segmentation_scrubs_future_literals_and_embedded_tool_actions(self):
+        raw = {
+            "trajectory_summary": "locate the article and then verify its answer",
+            "loops": [
+                loop_record(1, 0, 0, "SWITCH_LOOP", subgoal="Identify the target article"),
+                loop_record(
+                    2,
+                    1,
+                    1,
+                    "READY_TO_ANSWER",
+                    subgoal="Verify the extracted months by searching within the article page",
+                ),
+            ],
+        }
+        raw["loops"][1]["completion_test"] = (
+            "The 'May and June 2020' text is re-verified by opening the page again"
+        )
+        segmented = MODULE.validate_segmentation(
+            raw,
+            decision_count=2,
+            decision_message_limits=[6, 9],
+            has_final_answer=True,
+            question="During which months was the survey conducted?",
+            trajectory_messages=[
+                {"index": 6, "text": "A candidate article was found."},
+                {"index": 9, "text": "The survey occurred in May and June 2020."},
+            ],
+        )
+        contract = " ".join(
+            [segmented["loops"][1]["subgoal"], segmented["loops"][1]["completion_test"]]
+        )
+        self.assertNotIn("May and June 2020", contract)
+        self.assertNotRegex(contract.casefold(), r"\b(searching|opening)\b")
+
     def test_causal_payload_hides_next_loop_contract(self):
         boundary = {
             "action": "SWITCH_LOOP",
