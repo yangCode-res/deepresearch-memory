@@ -36,7 +36,7 @@ from build_working_state_dataset import (  # noqa: E402
 
 
 BOUNDARY_SYSTEM_PROMPT = """You are only the Loop boundary judge for a deep-research memory system.
-Return valid JSON only and do not write Working State, StateDelta, memory, tools, queries, or chain-of-thought.
+Return valid JSON only and do not write StateDelta, long-term memory, tools, queries, or chain-of-thought.
 
 A Loop is one coherent, locally decidable subgoal with one observable completion test. Tool choice, query
 wording, source changes, and one failed search are not boundaries. CONTINUE only while the committed subgoal
@@ -51,7 +51,7 @@ question; the first action must be CONTINUE unless the available evidence alread
 requires a genuinely different next subgoal and completion test."""
 
 
-STATE_SYSTEM_PROMPT = """You write semantic state content after a separate judge has fixed the Loop action.
+STATE_SYSTEM_PROMPT = """You write only durable StateDelta and cross-loop memory after a separate judge has fixed a terminal Loop action.
 Return valid JSON only. Do not reconsider or change fixed_action. Do not reveal chain-of-thought.
 
 Use only supplied messages and prior memories. Search snippets are provisional. Keep hypotheses distinct from
@@ -71,6 +71,7 @@ BOUNDARY_KEYS = {
     "outcome",
     "boundary_basis",
     "confidence",
+    "progress",
 }
 UPDATE_KEYS = {
     "progress_summary",
@@ -117,6 +118,19 @@ def boundary_contract() -> dict[str, Any]:
         "outcome": "IN_PROGRESS|RESOLVED|REFUTED|BLOCKED|SUPERSEDED",
         "boundary_basis": "NONE|SUBGOAL_COMPLETED|SUBGOAL_CHANGED|CANDIDATE_CHANGED|BLOCKED_OR_SATURATED|PHASE_TRANSITION|TASK_COMPLETE",
         "confidence": 0.8,
+        "progress": {
+            "progress_summary": "",
+            "resolved_aspects": [],
+            "open_aspects": [],
+            "key_evidence": [],
+            "candidate_answer": "",
+            "active_hypotheses": [],
+            "failed_strategies": [],
+            "evidence_gaps": [],
+            "answer_stable": False,
+            "evidence_sufficient": False,
+            "expected_information_gain": "HIGH",
+        },
     }
 
 
@@ -150,6 +164,23 @@ def validate_boundary(
         raw["boundary_basis"] = "NONE"
     if not current or not completion:
         raise ValueError("current subgoal and completion test are required")
+    progress = raw.get("progress")
+    if not isinstance(progress, dict) or set(progress) != UPDATE_KEYS:
+        raise ValueError("boundary progress has missing or extra fields")
+    for name in (
+        "resolved_aspects", "open_aspects", "key_evidence", "active_hypotheses",
+        "failed_strategies", "evidence_gaps",
+    ):
+        if not isinstance(progress.get(name), list):
+            raise ValueError(f"boundary progress.{name} must be a list")
+        progress[name] = [str(item)[:500] for item in progress[name] if str(item).strip()][:8]
+    for name in ("answer_stable", "evidence_sufficient"):
+        if not isinstance(progress.get(name), bool):
+            raise ValueError(f"boundary progress.{name} must be boolean")
+    gain = str(progress.get("expected_information_gain") or "").upper()
+    if gain not in GAIN_LEVELS:
+        raise ValueError("boundary progress has invalid expected_information_gain")
+    progress["expected_information_gain"] = gain
     outcome = str(raw["outcome"] or "").upper()
     basis = str(raw["boundary_basis"] or "").upper()
     # action is the learned judgment; dependent enum fields are mechanical.
@@ -197,6 +228,7 @@ def validate_boundary(
             "next_completion_test": next_test,
             "outcome": outcome,
             "boundary_basis": basis,
+            "progress": progress,
         }
     )
     return raw
@@ -280,19 +312,6 @@ def judge_boundary(
 def semantic_contract(action: str, loop_number: int) -> dict[str, Any]:
     empty_ops = {name: ([] if name != "completed_subgoal" else "") for name in DELTA_FIELDS}
     return {
-        "working_state_update": {
-            "progress_summary": "at most two sentences",
-            "resolved_aspects": [],
-            "open_aspects": [],
-            "key_evidence": ["fact with msg_NNNN source coordinate"],
-            "candidate_answer": "",
-            "active_hypotheses": [],
-            "failed_strategies": [],
-            "evidence_gaps": [],
-            "answer_stable": action == "READY_TO_ANSWER",
-            "evidence_sufficient": action == "READY_TO_ANSWER",
-            "expected_information_gain": "LOW" if action == "READY_TO_ANSWER" else "HIGH|MEDIUM|LOW",
-        },
         "durable_update": empty_ops,
         "loop_memory": (
             None
@@ -331,12 +350,10 @@ def build_target(
     allowed_memory_ids: set[str],
 ) -> dict[str, Any]:
     if not isinstance(raw, dict) or set(raw) != {
-        "working_state_update", "durable_update", "loop_memory", "retrieval", "next_loop_setup"
+        "durable_update", "loop_memory", "retrieval", "next_loop_setup"
     }:
         raise ValueError("semantic response has missing or extra fields")
-    update = raw["working_state_update"]
-    if not isinstance(update, dict) or set(update) != UPDATE_KEYS:
-        raise ValueError("working_state_update has missing or extra fields")
+    update = deepcopy(boundary["progress"])
     action = boundary["action"]
     if action == "READY_TO_ANSWER":
         update["answer_stable"] = True
@@ -479,6 +496,35 @@ def write_semantic_state(
     )
 
 
+def build_continue_target(
+    *,
+    boundary: dict[str, Any],
+    working_state: dict[str, Any],
+    loop_number: int,
+    seen_message_ids: set[str],
+    prior_memories: list[dict[str, Any]],
+) -> dict[str, Any]:
+    empty_ops = {name: ([] if name != "completed_subgoal" else "") for name in DELTA_FIELDS}
+    raw = {
+        "durable_update": empty_ops,
+        "loop_memory": None,
+        "retrieval": {
+            "query": boundary["current_subgoal"],
+            "relevant_memory_ids": [],
+            "reason": "No cross-loop memory was selected by the lightweight control pass.",
+        },
+        "next_loop_setup": None,
+    }
+    return build_target(
+        raw,
+        boundary=boundary,
+        working_before=working_state,
+        loop_number=loop_number,
+        seen_message_ids=seen_message_ids,
+        allowed_memory_ids={str(memory["memory_id"]) for memory in prior_memories},
+    )
+
+
 def compact_memories(memories: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [
         {
@@ -606,17 +652,26 @@ def main() -> None:
                         and counts["READY_TO_ANSWER"] >= quotas["READY_TO_ANSWER"]
                     ):
                         break
-                    target = write_semantic_state(
-                        state_client,
-                        question=question,
-                        global_state=global_state,
-                        working_state=working_state,
-                        prior_memories=memories,
-                        observed_messages=state_messages,
-                        boundary=boundary,
-                        loop_number=loop_number,
-                        seen_message_ids=seen_ids,
-                    )
+                    if boundary["action"] == "CONTINUE_CURRENT_LOOP":
+                        target = build_continue_target(
+                            boundary=boundary,
+                            working_state=working_state,
+                            loop_number=loop_number,
+                            seen_message_ids=seen_ids,
+                            prior_memories=memories,
+                        )
+                    else:
+                        target = write_semantic_state(
+                            state_client,
+                            question=question,
+                            global_state=global_state,
+                            working_state=working_state,
+                            prior_memories=memories,
+                            observed_messages=state_messages,
+                            boundary=boundary,
+                            loop_number=loop_number,
+                            seen_message_ids=seen_ids,
+                        )
                 except Exception as exc:
                     errors.append({"qid": row.get("qid"), "step": step["step_index"], "error": str(exc)})
                     print(f"[pilot-v2] abandon qid={row.get('qid')} step={step['step_index']}: {exc}", flush=True)
