@@ -16,9 +16,10 @@ MODULE = module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 
 
-def decision(
-    index: int,
+def loop_record(
     number: int,
+    start: int,
+    end: int,
     action: str,
     *,
     subgoal: str,
@@ -32,15 +33,15 @@ def decision(
             "TASK_COMPLETE" if action == "READY_TO_ANSWER" else "SUBGOAL_COMPLETED"
         )
     return {
-        "decision_index": index,
         "loop_number": number,
-        "current_subgoal": subgoal,
+        "start_decision_index": start,
+        "end_decision_index": end,
+        "subgoal": subgoal,
         "completion_test": f"Evidence establishes whether to {subgoal.lower()}",
-        "action": action,
+        "end_action": action,
         "outcome": outcome,
         "boundary_basis": basis,
         "boundary_reason": "The evidence objective has reached its retrospective boundary.",
-        "boundary_message_ids": [f"msg_{6 + index * 3:04d}"],
     }
 
 
@@ -64,13 +65,12 @@ class RetrospectiveBuilderTest(unittest.TestCase):
     def test_segmentation_maps_decisions_to_loops(self):
         raw = {
             "trajectory_summary": "identify candidate, verify date, then answer",
-            "decisions": [
-                decision(0, 1, "CONTINUE_CURRENT_LOOP", subgoal="Identify the target work"),
-                decision(1, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
-                decision(2, 2, "CONTINUE_CURRENT_LOOP", subgoal="Establish the requested date"),
-                decision(
-                    3,
+            "loops": [
+                loop_record(1, 0, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
+                loop_record(
                     2,
+                    2,
+                    3,
                     "READY_TO_ANSWER",
                     subgoal="Establish the requested date",
                 ),
@@ -99,9 +99,10 @@ class RetrospectiveBuilderTest(unittest.TestCase):
     def test_segmentation_rejects_gap(self):
         raw = {
             "trajectory_summary": "two stages",
-            "decisions": [
-                decision(0, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
-                decision(
+            "loops": [
+                loop_record(1, 0, 0, "SWITCH_LOOP", subgoal="Identify the target work"),
+                loop_record(
+                    2,
                     2,
                     2,
                     "READY_TO_ANSWER",
@@ -109,70 +110,60 @@ class RetrospectiveBuilderTest(unittest.TestCase):
                 ),
             ],
         }
-        with self.assertRaisesRegex(ValueError, "consecutive"):
-            MODULE.validate_segmentation(raw, decision_count=2)
+        with self.assertRaisesRegex(ValueError, "contiguously"):
+            MODULE.validate_segmentation(raw, decision_count=3)
 
     def test_segmentation_must_cover_all_decisions(self):
         raw = {
             "trajectory_summary": "unfinished research",
-            "decisions": [
-                decision(
+            "loops": [
+                loop_record(
+                    1,
                     0,
-                    1,
-                    "CONTINUE_CURRENT_LOOP",
-                    subgoal="Establish the requested date",
-                ),
-                decision(
-                    1,
                     1,
                     "CONTINUE_CURRENT_LOOP",
                     subgoal="Establish the requested date",
                 ),
             ],
         }
-        with self.assertRaisesRegex(ValueError, "annotate every"):
+        with self.assertRaisesRegex(ValueError, "cover every"):
             MODULE.validate_segmentation(raw, decision_count=3)
 
-    def test_segmentation_allows_retrospective_lookahead_coordinate(self):
+    def test_segmentation_requires_ready_when_final_answer_follows(self):
         raw = {
             "trajectory_summary": "one decision",
-            "decisions": [
-                decision(
-                    0,
+            "loops": [
+                loop_record(
                     1,
-                    "READY_TO_ANSWER",
+                    0,
+                    0,
+                    "CONTINUE_CURRENT_LOOP",
                     subgoal="Establish the requested date",
                 )
             ],
         }
-        raw["decisions"][0]["boundary_message_ids"] = ["msg_0009"]
-        segmented = MODULE.validate_segmentation(
-            raw,
-            decision_count=1,
-            decision_message_limits=[6],
-            trajectory_message_limit=9,
-            has_final_answer=True,
-        )
-        self.assertEqual(segmented["decisions"][0]["boundary_message_ids"], ["msg_0009"])
+        with self.assertRaisesRegex(ValueError, "requires READY"):
+            MODULE.validate_segmentation(raw, decision_count=1, has_final_answer=True)
 
-    def test_segmentation_rejects_ready_before_final_decision(self):
+    def test_segmentation_rejects_nonfinal_ready_loop(self):
         raw = {
             "trajectory_summary": "agent keeps researching after the first observation",
-            "decisions": [
-                decision(0, 1, "READY_TO_ANSWER", subgoal="Establish the requested date"),
-                decision(1, 1, "READY_TO_ANSWER", subgoal="Establish the requested date"),
+            "loops": [
+                loop_record(1, 0, 0, "READY_TO_ANSWER", subgoal="Establish the requested date"),
+                loop_record(2, 1, 1, "READY_TO_ANSWER", subgoal="Establish the requested country"),
             ],
         }
-        with self.assertRaisesRegex(ValueError, "final tool-result"):
+        with self.assertRaisesRegex(ValueError, "non-final Loop"):
             MODULE.validate_segmentation(raw, decision_count=2, has_final_answer=True)
 
     def test_segmentation_normalizes_action_dependent_enums(self):
         raw = {
             "trajectory_summary": "answer becomes available immediately",
-            "decisions": [
-                decision(
-                    0,
+            "loops": [
+                loop_record(
                     1,
+                    0,
+                    0,
                     "READY_TO_ANSWER",
                     subgoal="Establish the requested date",
                     outcome="IN_PROGRESS",
@@ -181,7 +172,7 @@ class RetrospectiveBuilderTest(unittest.TestCase):
             ],
         }
         segmented = MODULE.validate_segmentation(raw, decision_count=1)
-        item = segmented["decisions"][0]
+        item = segmented["loops"][0]
         self.assertEqual(item["outcome"], "RESOLVED")
         self.assertEqual(item["boundary_basis"], "TASK_COMPLETE")
 

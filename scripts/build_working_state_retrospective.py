@@ -65,15 +65,12 @@ only when the following agent content transitions to the final answer without an
 
 Do not label an earlier point READY merely because hindsight reveals that its evidence could have been enough.
 If the recorded agent performs later verification of the same claim, those decisions remain in the same Loop.
-Annotate every tool-result decision in the trajectory. Cite boundary_message_ids from the current tool result
-and/or following assistant message(s) that make the phase relation visible. These IDs are retrospective audit
-coordinates and are kept outside the eventual model-training input.
 
-Decision indices refer only to tool-result messages marked with decision_index. Decision annotations must start
-at 0 and be consecutive. loop_number starts at 1; it stays unchanged after CONTINUE and increases by exactly one
-after SWITCH. Subgoals and completion tests must remain byte-for-byte identical inside a Loop and must describe
-information outcomes; never name a website, URL, query, browser operation, or tool. Later messages help locate
-boundaries but must not be used to claim that evidence existed earlier than it did."""
+Decision indices refer only to tool-result messages marked with decision_index. Return contiguous Loop ranges
+that start at decision 0, cover every decision exactly once, and never overlap. Every non-final Loop ends with
+SWITCH_LOOP; the final Loop ends with READY_TO_ANSWER when the recorded trajectory transitions to a final answer.
+Subgoals and completion tests must describe information outcomes; never name a website, URL, query, browser
+operation, or tool. The ranges are retrospective annotations kept outside model-training input."""
 
 
 CAUSAL_STATE_SYSTEM_PROMPT = """You create a causal Working-State label at one fixed decision point.
@@ -92,17 +89,17 @@ msg_NNNN coordinate. A terminal loop_memory must contain at least one evidence_i
 deliberately hidden from you so it cannot leak future content into the current Loop's evidence or memory."""
 
 
-SEGMENTATION_KEYS = {"trajectory_summary", "decisions"}
-DECISION_ANNOTATION_KEYS = {
-    "decision_index",
+SEGMENTATION_KEYS = {"trajectory_summary", "loops"}
+LOOP_KEYS = {
     "loop_number",
-    "current_subgoal",
+    "start_decision_index",
+    "end_decision_index",
+    "subgoal",
     "completion_test",
-    "action",
+    "end_action",
     "outcome",
     "boundary_basis",
     "boundary_reason",
-    "boundary_message_ids",
 }
 CAUSAL_KEYS = {
     "decision_reason",
@@ -116,20 +113,20 @@ CAUSAL_KEYS = {
 def segmentation_contract(decision_count: int) -> dict[str, Any]:
     return {
         "trajectory_summary": "brief description of the research progression",
-        "decisions": [
+        "loops": [
             {
-                "decision_index": f"consecutive integer from 0 to at most {decision_count - 1}",
                 "loop_number": 1,
-                "current_subgoal": "one independently decidable information objective",
+                "start_decision_index": 0,
+                "end_decision_index": f"integer from 0 to {decision_count - 1}",
+                "subgoal": "one independently decidable information objective",
                 "completion_test": "observable evidence condition",
-                "action": "CONTINUE_CURRENT_LOOP|SWITCH_LOOP|READY_TO_ANSWER",
+                "end_action": "SWITCH_LOOP|READY_TO_ANSWER|CONTINUE_CURRENT_LOOP",
                 "outcome": "IN_PROGRESS|RESOLVED|REFUTED|BLOCKED|SUPERSEDED",
                 "boundary_basis": (
                     "NONE|SUBGOAL_COMPLETED|SUBGOAL_CHANGED|CANDIDATE_CHANGED|"
                     "BLOCKED_OR_SATURATED|PHASE_TRANSITION|TASK_COMPLETE"
                 ),
                 "boundary_reason": "short explanation of how following agent work relates to the current Loop",
-                "boundary_message_ids": ["current tool and/or following assistant msg_NNNN"],
             }
         ],
     }
@@ -137,11 +134,6 @@ def segmentation_contract(decision_count: int) -> dict[str, Any]:
 
 def _normalize_text(value: Any) -> str:
     return " ".join(str(value or "").strip().split())
-
-
-def _message_number(message_id: str) -> int | None:
-    match = re.fullmatch(r"msg_(\d{4})", str(message_id))
-    return int(match.group(1)) if match else None
 
 
 def validate_segmentation(
@@ -155,56 +147,44 @@ def validate_segmentation(
     if not isinstance(raw, dict) or set(raw) != SEGMENTATION_KEYS:
         raise ValueError("segmentation response has missing or extra fields")
     summary = _normalize_text(raw["trajectory_summary"])
-    decisions = raw.get("decisions")
-    if not summary or not isinstance(decisions, list) or not decisions:
-        raise ValueError("segmentation requires a summary and at least one decision annotation")
-    if len(decisions) != decision_count:
-        raise ValueError("retrospective segmentation must annotate every tool-result decision")
+    loops = raw.get("loops")
+    if not summary or not isinstance(loops, list) or not loops:
+        raise ValueError("segmentation requires a summary and at least one Loop")
     if decision_message_limits is not None and len(decision_message_limits) != decision_count:
         raise ValueError("decision_message_limits must cover the complete trajectory")
 
     normalized: list[dict[str, Any]] = []
-    previous: dict[str, Any] | None = None
-    for expected_index, item in enumerate(decisions):
-        if not isinstance(item, dict) or set(item) != DECISION_ANNOTATION_KEYS:
-            raise ValueError("a decision annotation has missing or extra fields")
+    expected_start = 0
+    for position, item in enumerate(loops, start=1):
+        if not isinstance(item, dict) or set(item) != LOOP_KEYS:
+            raise ValueError("a Loop has missing or extra fields")
         try:
-            decision_index = int(item["decision_index"])
             loop_number = int(item["loop_number"])
+            start = int(item["start_decision_index"])
+            end = int(item["end_decision_index"])
         except (TypeError, ValueError) as exc:
-            raise ValueError("loop_number and decision_index must be integers") from exc
-        if decision_index != expected_index:
-            raise ValueError("decision annotations must be consecutive starting at decision 0")
-        expected_loop = 1 if previous is None else (
-            previous["loop_number"] + 1
-            if previous["action"] == "SWITCH_LOOP"
-            else previous["loop_number"]
-        )
-        if loop_number != expected_loop:
-            raise ValueError("loop_number must increase exactly once after SWITCH and otherwise stay fixed")
-        subgoal = _normalize_text(item["current_subgoal"])
+            raise ValueError("Loop numbers and decision indices must be integers") from exc
+        if loop_number != position:
+            raise ValueError("Loop numbers must be consecutive starting at 1")
+        if start != expected_start or end < start or end >= decision_count:
+            raise ValueError("Loops must contiguously cover decision points from decision 0")
+        subgoal = _normalize_text(item["subgoal"])
         completion_test = _normalize_text(item["completion_test"])
         reason = _normalize_text(item["boundary_reason"])
         if not subgoal or not completion_test or not reason:
-            raise ValueError("decision Loop contract and boundary reason cannot be empty")
+            raise ValueError("Loop contract and boundary reason cannot be empty")
         if CONCRETE_ACTION_PATTERN.search("\n".join((subgoal, completion_test))):
             raise ValueError("Loop contracts cannot contain concrete tools, queries, URLs, or named sites")
-        if previous is not None and loop_number == previous["loop_number"] and (
-            subgoal != previous["current_subgoal"]
-            or completion_test != previous["completion_test"]
-        ):
-            raise ValueError("subgoal and completion_test must remain identical inside one Loop")
-        if previous is not None and loop_number != previous["loop_number"]:
-            if semantic_similarity(previous["current_subgoal"], subgoal) >= 0.72:
-                raise ValueError("a SWITCH cannot be a source/query rephrasing of the same subgoal")
-        action = str(item["action"] or "").upper()
+        action = str(item["end_action"] or "").upper()
         outcome = str(item["outcome"] or "").upper()
         basis = str(item["boundary_basis"] or "").upper()
         if action not in ACTIONS:
-            raise ValueError("invalid decision action")
-        # action is the retrospective judgment.  outcome and boundary_basis are
-        # dependent enum fields, so normalize them deterministically rather
-        # than consuming a repair request for an internally inconsistent tuple.
+            raise ValueError("invalid Loop end_action")
+        is_last = position == len(loops)
+        if not is_last and action != "SWITCH_LOOP":
+            raise ValueError("every non-final Loop must end with SWITCH_LOOP")
+        if is_last and action == "SWITCH_LOOP":
+            raise ValueError("the final Loop cannot end with SWITCH_LOOP")
         if action == "CONTINUE_CURRENT_LOOP":
             outcome, basis = "IN_PROGRESS", "NONE"
         elif action == "READY_TO_ANSWER":
@@ -216,79 +196,33 @@ def validate_segmentation(
                 outcome = "RESOLVED"
             if basis in {"", "NONE", "TASK_COMPLETE"}:
                 basis = "SUBGOAL_COMPLETED" if outcome == "RESOLVED" else "SUBGOAL_CHANGED"
-        message_limit = (
-            decision_message_limits[decision_index]
-            if decision_message_limits is not None
-            else None
-        )
-        boundary_message_ids = []
-        for value in item.get("boundary_message_ids") or []:
-            evidence_id = str(value)
-            number = _message_number(evidence_id)
-            if number is not None and (
-                trajectory_message_limit is None or number <= trajectory_message_limit
-            ):
-                boundary_message_ids.append(evidence_id)
-        if not boundary_message_ids and message_limit is not None:
-            boundary_message_ids = [f"msg_{message_limit:04d}"]
-        if not boundary_message_ids:
-            raise ValueError("every decision annotation requires boundary_message_ids")
-        normalized_item = {
-            "decision_index": decision_index,
+        normalized.append({
             "loop_number": loop_number,
-            "current_subgoal": subgoal,
+            "start_decision_index": start,
+            "end_decision_index": end,
+            "subgoal": subgoal,
             "completion_test": completion_test,
-            "action": action,
+            "end_action": action,
             "outcome": outcome,
             "boundary_basis": basis,
             "boundary_reason": reason,
-            "boundary_message_ids": boundary_message_ids,
-        }
-        normalized.append(normalized_item)
-        previous = normalized_item
+        })
+        expected_start = end + 1
 
     final = normalized[-1]
-    if final["action"] == "SWITCH_LOOP":
-        raise ValueError("the final included decision cannot SWITCH without a following Loop decision")
-    if any(item["action"] == "READY_TO_ANSWER" for item in normalized[:-1]):
-        raise ValueError("READY is only valid at the final tool-result decision")
-    if has_final_answer is True and final["action"] != "READY_TO_ANSWER":
+    if final["end_decision_index"] != decision_count - 1:
+        raise ValueError("Loop ranges must cover every tool-result decision")
+    if has_final_answer is True and final["end_action"] != "READY_TO_ANSWER":
         raise ValueError("a successful trajectory ending in a final answer requires READY at its last decision")
-    if has_final_answer is False and final["action"] == "READY_TO_ANSWER":
+    if has_final_answer is False and final["end_action"] == "READY_TO_ANSWER":
         raise ValueError("READY requires a following final-answer transition")
-
-    loops: list[dict[str, Any]] = []
-    for item in normalized:
-        if not loops or item["loop_number"] != loops[-1]["loop_number"]:
-            loops.append(
-                {
-                    "loop_number": item["loop_number"],
-                    "start_decision_index": item["decision_index"],
-                    "end_decision_index": item["decision_index"],
-                    "subgoal": item["current_subgoal"],
-                    "completion_test": item["completion_test"],
-                    "end_action": item["action"],
-                    "outcome": item["outcome"],
-                    "boundary_basis": item["boundary_basis"],
-                    "boundary_reason": item["boundary_reason"],
-                }
-            )
-        else:
-            loops[-1].update(
-                {
-                    "end_decision_index": item["decision_index"],
-                    "end_action": item["action"],
-                    "outcome": item["outcome"],
-                    "boundary_basis": item["boundary_basis"],
-                    "boundary_reason": item["boundary_reason"],
-                }
-            )
-    if any(item["end_action"] != "SWITCH_LOOP" for item in loops[:-1]):
-        raise ValueError("every non-final derived Loop must end with SWITCH_LOOP")
+    for left, right in zip(normalized, normalized[1:]):
+        if semantic_similarity(left["subgoal"], right["subgoal"]) >= 0.72:
+            raise ValueError("adjacent Loops appear to be source/query rephrasings of the same subgoal")
 
     raw["trajectory_summary"] = summary
-    raw["decisions"] = normalized
-    return {**raw, "loops": loops}
+    raw["loops"] = normalized
+    return raw
 
 
 def trajectory_view(
@@ -408,19 +342,20 @@ def loop_for_decision(segmentation: dict[str, Any], decision_index: int) -> dict
 
 
 def boundary_for_decision(segmentation: dict[str, Any], decision_index: int) -> dict[str, Any]:
-    decisions = segmentation["decisions"]
-    current = decisions[decision_index]
-    action = current["action"]
-    next_decision = decisions[decision_index + 1] if action == "SWITCH_LOOP" else None
+    loops = segmentation["loops"]
+    current = loop_for_decision(segmentation, decision_index)
+    at_end = decision_index == current["end_decision_index"]
+    action = current["end_action"] if at_end else "CONTINUE_CURRENT_LOOP"
+    next_loop = loops[current["loop_number"]] if action == "SWITCH_LOOP" else None
     return {
         "action": action,
         "reason": "",
-        "current_subgoal": current["current_subgoal"],
+        "current_subgoal": current["subgoal"],
         "current_completion_test": current["completion_test"],
-        "next_subgoal": next_decision["current_subgoal"] if next_decision else "",
-        "next_completion_test": next_decision["completion_test"] if next_decision else "",
-        "outcome": current["outcome"],
-        "boundary_basis": current["boundary_basis"],
+        "next_subgoal": next_loop["subgoal"] if next_loop else "",
+        "next_completion_test": next_loop["completion_test"] if next_loop else "",
+        "outcome": current["outcome"] if at_end else "IN_PROGRESS",
+        "boundary_basis": current["boundary_basis"] if at_end else "NONE",
         "confidence": 1.0,
         "progress": {},
     }
