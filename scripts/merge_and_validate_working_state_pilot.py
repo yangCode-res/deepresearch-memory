@@ -14,7 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from build_working_state_dataset import CONCRETE_ACTION_PATTERN, validate_label  # noqa: E402
+from build_working_state_dataset import (  # noqa: E402
+    CONCRETE_ACTION_PATTERN,
+    validate_label,
+    write_preview,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -83,6 +87,7 @@ def main() -> None:
     with args.output.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    write_preview(args.output.with_suffix(".preview.md"), rows, count=len(rows))
     report = {
         "samples": len(rows),
         "action_counts": action_counts,
