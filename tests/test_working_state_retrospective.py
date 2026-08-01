@@ -273,6 +273,55 @@ class RetrospectiveBuilderTest(unittest.TestCase):
                 allowed_memory_ids=set(),
             )
 
+    def test_continue_mechanically_discards_durable_output(self):
+        operations = {
+            name: ([] if name != "completed_subgoal" else "")
+            for name in MODULE.DELTA_FIELDS
+        }
+        operations["add_working_hypotheses"] = ["A provisional candidate"]
+        raw = {
+            "decision_reason": "The same information objective remains open.",
+            "progress": {
+                "progress_summary": "A candidate path is visible in msg_0006.",
+                "resolved_aspects": [],
+                "open_aspects": ["The exact answer remains unsupported."],
+                "key_evidence": ["msg_0006 shows a candidate source."],
+                "candidate_answer": "",
+                "active_hypotheses": ["The candidate may contain the answer."],
+                "failed_strategies": [],
+                "evidence_gaps": ["Direct support is missing."],
+                "answer_stable": False,
+                "evidence_sufficient": False,
+                "expected_information_gain": "HIGH",
+            },
+            "durable_update": operations,
+            "loop_memory": {"unexpected": True},
+            "retrieval": {"query": "candidate evidence", "relevant_memory_ids": [], "reason": "none"},
+        }
+        boundary = {
+            "action": "CONTINUE_CURRENT_LOOP",
+            "reason": "",
+            "current_subgoal": "Identify the requested fact",
+            "current_completion_test": "Direct evidence establishes the requested fact",
+            "next_subgoal": "",
+            "next_completion_test": "",
+            "outcome": "IN_PROGRESS",
+            "boundary_basis": "NONE",
+            "confidence": 1.0,
+            "progress": {},
+        }
+        target = MODULE.validate_causal_raw(
+            raw,
+            boundary=boundary,
+            working_before=MODULE.initial_working_state(),
+            loop_number=1,
+            seen_message_ids={"msg_0006"},
+            allowed_memory_ids=set(),
+        )
+        self.assertEqual(target["state_delta"]["mode"], "NOOP")
+        self.assertIsNone(target["cross_loop_memory"])
+        self.assertFalse(any(target["state_delta"]["operations"].values()))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -513,10 +513,15 @@ def validate_causal_raw(
     if not isinstance(operations, dict) or set(operations) != DELTA_FIELDS:
         raise ValueError("durable_update has missing or extra fields")
     if action == "CONTINUE_CURRENT_LOOP":
-        if raw.get("loop_memory") is not None:
-            raise ValueError("CONTINUE must not create loop_memory")
-        if any(operations[name] for name in DELTA_FIELDS):
-            raise ValueError("CONTINUE must have an empty durable_update")
+        # CONTINUE's persistence policy is deterministic.  Preserve the model's
+        # loop-local progress, but never spend a repair request on extra durable
+        # fields that the controller must discard anyway.
+        operations = {
+            name: ([] if name != "completed_subgoal" else "")
+            for name in DELTA_FIELDS
+        }
+        raw["durable_update"] = operations
+        raw["loop_memory"] = None
     else:
         memory = raw.get("loop_memory")
         if not isinstance(memory, dict):
