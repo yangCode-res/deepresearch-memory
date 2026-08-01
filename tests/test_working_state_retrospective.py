@@ -1,0 +1,211 @@
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
+import copy
+import sys
+import unittest
+
+
+SCRIPTS = Path(__file__).parents[1] / "scripts"
+sys.path.insert(0, str(SCRIPTS))
+SPEC = spec_from_file_location(
+    "build_working_state_retrospective",
+    SCRIPTS / "build_working_state_retrospective.py",
+)
+assert SPEC and SPEC.loader
+MODULE = module_from_spec(SPEC)
+SPEC.loader.exec_module(MODULE)
+
+
+def loop(
+    number: int,
+    start: int,
+    end: int,
+    action: str,
+    *,
+    subgoal: str,
+    outcome: str = "RESOLVED",
+    basis: str = "SUBGOAL_COMPLETED",
+):
+    return {
+        "loop_number": number,
+        "start_decision_index": start,
+        "end_decision_index": end,
+        "subgoal": subgoal,
+        "completion_test": f"Evidence establishes whether to {subgoal.lower()}",
+        "end_action": action,
+        "outcome": outcome,
+        "boundary_basis": basis,
+        "boundary_reason": "The evidence objective has reached its retrospective boundary.",
+    }
+
+
+class RetrospectiveBuilderTest(unittest.TestCase):
+    def test_full_trajectory_view_includes_final_after_last_tool(self):
+        messages = [
+            {"role": "system", "content": "hidden"},
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": "reason"},
+            {"role": "tool", "content": "observation"},
+            {"role": "assistant", "channel": "final", "content": "final answer"},
+        ]
+        view, count = MODULE.trajectory_view(messages)
+        self.assertEqual(count, 1)
+        self.assertEqual([item["role"] for item in view], ["assistant", "tool", "assistant"])
+        self.assertEqual(view[-1]["text"], "final answer")
+        self.assertEqual(view[1]["decision_index"], 0)
+
+    def test_segmentation_maps_ranges_to_actions_and_allows_early_ready(self):
+        raw = {
+            "trajectory_summary": "identify candidate, verify date, then answer",
+            "loops": [
+                loop(1, 0, 1, "SWITCH_LOOP", subgoal="Identify the target work"),
+                loop(
+                    2,
+                    2,
+                    3,
+                    "READY_TO_ANSWER",
+                    subgoal="Establish the requested date",
+                    basis="TASK_COMPLETE",
+                ),
+            ],
+        }
+        segmented = MODULE.validate_segmentation(raw, decision_count=6)
+        self.assertEqual(
+            MODULE.boundary_for_decision(segmented, 0)["action"],
+            "CONTINUE_CURRENT_LOOP",
+        )
+        boundary = MODULE.boundary_for_decision(segmented, 1)
+        self.assertEqual(boundary["action"], "SWITCH_LOOP")
+        self.assertEqual(boundary["next_subgoal"], "Establish the requested date")
+        self.assertEqual(
+            MODULE.boundary_for_decision(segmented, 3)["action"],
+            "READY_TO_ANSWER",
+        )
+
+    def test_segmentation_rejects_gap(self):
+        raw = {
+            "trajectory_summary": "two stages",
+            "loops": [
+                loop(1, 0, 0, "SWITCH_LOOP", subgoal="Identify the target work"),
+                loop(
+                    2,
+                    2,
+                    2,
+                    "READY_TO_ANSWER",
+                    subgoal="Establish the requested date",
+                    basis="TASK_COMPLETE",
+                ),
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "contiguously"):
+            MODULE.validate_segmentation(raw, decision_count=3)
+
+    def test_incomplete_segmentation_must_cover_all_decisions(self):
+        raw = {
+            "trajectory_summary": "unfinished research",
+            "loops": [
+                loop(
+                    1,
+                    0,
+                    1,
+                    "CONTINUE_CURRENT_LOOP",
+                    subgoal="Establish the requested date",
+                    outcome="IN_PROGRESS",
+                    basis="NONE",
+                )
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "cover every"):
+            MODULE.validate_segmentation(raw, decision_count=3)
+
+    def test_causal_payload_hides_next_loop_contract(self):
+        boundary = {
+            "action": "SWITCH_LOOP",
+            "current_subgoal": "Identify the target work",
+            "current_completion_test": "The target identity is established",
+            "next_subgoal": "SECRET FUTURE SUBGOAL",
+            "next_completion_test": "SECRET FUTURE TEST",
+            "outcome": "RESOLVED",
+            "boundary_basis": "SUBGOAL_COMPLETED",
+        }
+        payload = MODULE.causal_teacher_payload(
+            question="question",
+            global_state={},
+            working_state={},
+            prior_memories=[],
+            observed_messages=[],
+            boundary=boundary,
+            loop_number=1,
+            seen_message_ids=set(),
+        )
+        rendered = str(payload)
+        self.assertNotIn("SECRET FUTURE", rendered)
+        self.assertNotIn("next_loop_contract", payload)
+
+    def test_causality_audit_rejects_future_ids_anywhere_in_input_or_target(self):
+        record = {
+            "source": {"prefix_end_message_index": 7},
+            "input": {
+                "observed_messages": [{"index": 7}],
+                "current_loop_evidence_ids": ["msg_0007"],
+                "working_state_before": {"progress_summary": "future msg_0008"},
+            },
+            "target": {"summary": "supported by msg_0007"},
+        }
+        errors = MODULE.audit_record_causality(record)
+        self.assertIn("training input contains a future evidence ID", errors)
+        clean = copy.deepcopy(record)
+        clean["input"]["working_state_before"]["progress_summary"] = "past msg_0006"
+        clean["target"]["summary"] = "future msg_0009"
+        errors = MODULE.audit_record_causality(clean)
+        self.assertIn("training target cites a future message ID", errors)
+
+    def test_validate_causal_raw_requires_key_evidence_citation(self):
+        empty_ops = {
+            name: ([] if name != "completed_subgoal" else "")
+            for name in MODULE.DELTA_FIELDS
+        }
+        raw = {
+            "decision_reason": "The evidence objective remains incomplete.",
+            "progress": {
+                "progress_summary": "A candidate exists.",
+                "resolved_aspects": [],
+                "open_aspects": ["The exact date remains unsupported."],
+                "key_evidence": ["A candidate exists without a citation"],
+                "candidate_answer": "",
+                "active_hypotheses": [],
+                "failed_strategies": [],
+                "evidence_gaps": ["Direct support is missing."],
+                "answer_stable": False,
+                "evidence_sufficient": False,
+                "expected_information_gain": "HIGH",
+            },
+            "durable_update": empty_ops,
+            "loop_memory": None,
+            "retrieval": {"query": "identity", "relevant_memory_ids": [], "reason": "none"},
+        }
+        boundary = {
+            "action": "CONTINUE_CURRENT_LOOP",
+            "reason": "",
+            "current_subgoal": "Identify the target work",
+            "current_completion_test": "The target identity is established",
+            "next_subgoal": "",
+            "next_completion_test": "",
+            "outcome": "IN_PROGRESS",
+            "boundary_basis": "NONE",
+            "confidence": 1.0,
+            "progress": {},
+        }
+        with self.assertRaisesRegex(ValueError, "key_evidence"):
+            MODULE.validate_causal_raw(
+                raw,
+                boundary=boundary,
+                working_before=MODULE.initial_working_state(),
+                loop_number=1,
+                seen_message_ids={"msg_0006"},
+                allowed_memory_ids=set(),
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()
