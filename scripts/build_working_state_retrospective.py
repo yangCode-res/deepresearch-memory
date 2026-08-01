@@ -201,12 +201,20 @@ def validate_segmentation(
         basis = str(item["boundary_basis"] or "").upper()
         if action not in ACTIONS:
             raise ValueError("invalid decision action")
-        if action == "CONTINUE_CURRENT_LOOP" and (outcome != "IN_PROGRESS" or basis != "NONE"):
-            raise ValueError("CONTINUE requires IN_PROGRESS and boundary_basis=NONE")
-        if action == "SWITCH_LOOP" and (outcome == "IN_PROGRESS" or basis in {"", "NONE", "TASK_COMPLETE"}):
-            raise ValueError("SWITCH requires a terminal Loop outcome and a real non-task boundary")
-        if action == "READY_TO_ANSWER" and (outcome != "RESOLVED" or basis != "TASK_COMPLETE"):
-            raise ValueError("READY requires RESOLVED and boundary_basis=TASK_COMPLETE")
+        # action is the retrospective judgment.  outcome and boundary_basis are
+        # dependent enum fields, so normalize them deterministically rather
+        # than consuming a repair request for an internally inconsistent tuple.
+        if action == "CONTINUE_CURRENT_LOOP":
+            outcome, basis = "IN_PROGRESS", "NONE"
+        elif action == "READY_TO_ANSWER":
+            outcome, basis = "RESOLVED", "TASK_COMPLETE"
+        else:
+            if outcome == "IN_PROGRESS" or outcome not in {
+                "RESOLVED", "REFUTED", "BLOCKED", "SUPERSEDED"
+            }:
+                outcome = "RESOLVED"
+            if basis in {"", "NONE", "TASK_COMPLETE"}:
+                basis = "SUBGOAL_COMPLETED" if outcome == "RESOLVED" else "SUBGOAL_CHANGED"
         message_limit = (
             decision_message_limits[decision_index]
             if decision_message_limits is not None

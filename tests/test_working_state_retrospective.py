@@ -150,6 +150,25 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         )
         self.assertEqual(segmented["decisions"][0]["causal_evidence_ids"], ["msg_0006"])
 
+    def test_segmentation_normalizes_action_dependent_enums(self):
+        raw = {
+            "trajectory_summary": "answer becomes available immediately",
+            "decisions": [
+                decision(
+                    0,
+                    1,
+                    "READY_TO_ANSWER",
+                    subgoal="Establish the requested date",
+                    outcome="IN_PROGRESS",
+                    basis="NONE",
+                )
+            ],
+        }
+        segmented = MODULE.validate_segmentation(raw, decision_count=1)
+        item = segmented["decisions"][0]
+        self.assertEqual(item["outcome"], "RESOLVED")
+        self.assertEqual(item["boundary_basis"], "TASK_COMPLETE")
+
     def test_causal_payload_hides_next_loop_contract(self):
         boundary = {
             "action": "SWITCH_LOOP",
