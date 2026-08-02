@@ -466,7 +466,10 @@ def iter_rows(paths: list[str], *, seed: int) -> Iterable[dict[str, Any]]:
         for group in groups:
             rows = parquet.read_row_group(group).to_pylist()
             rng.shuffle(rows)
-            yield from rows
+            for row in rows:
+                row["_source_path"] = path
+                row["_source_seed"] = Path(path).parent.name
+                yield row
 
 
 def write_preview(path: Path, records: list[dict[str, Any]], *, count: int) -> None:

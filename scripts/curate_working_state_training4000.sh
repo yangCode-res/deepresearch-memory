@@ -26,7 +26,15 @@ for shard in 0 1 2 3; do
 done
 for shard in $(seq 0 31); do
   stem="data/working-state-labels/scale1000/working_state_retrospective_mimo25pro_shard${shard}"
-  args+=(--pool "${stem}.jsonl" --segments "${stem}.segments.jsonl")
+  if [[ -f "${stem}.jsonl" && -f "${stem}.segments.jsonl" ]]; then
+    args+=(--pool "${stem}.jsonl" --segments "${stem}.segments.jsonl")
+  fi
+done
+for shard in $(seq 0 15); do
+  stem="data/working-state-labels/scale1000_rollouts/working_state_retrospective_mimo25pro_shard${shard}"
+  if [[ -f "${stem}.jsonl" && -f "${stem}.segments.jsonl" ]]; then
+    args+=(--pool "${stem}.jsonl" --segments "${stem}.segments.jsonl")
+  fi
 done
 args+=(
   --output "$OUTPUT"

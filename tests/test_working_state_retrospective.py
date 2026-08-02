@@ -64,6 +64,12 @@ class RetrospectiveBuilderTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             MODULE.qid_in_partition("1", modulus=4, remainder=4)
 
+    def test_source_trajectory_id_distinguishes_seed_rollouts(self):
+        first = MODULE.source_trajectory_id({"qid": 42, "_source_seed": "seed_42"})
+        second = MODULE.source_trajectory_id({"qid": 42, "_source_seed": "seed_43"})
+        self.assertEqual(first, "seed_42:qid_42")
+        self.assertNotEqual(first, second)
+
     def test_excluded_qids_load_from_json_or_lines(self):
         from tempfile import TemporaryDirectory
 

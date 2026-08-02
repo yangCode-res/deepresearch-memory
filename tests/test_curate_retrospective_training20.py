@@ -27,6 +27,14 @@ def sample(step: int, action: str, *, memories: list[str] | None = None):
 
 
 class RetrospectiveCuratorTest(unittest.TestCase):
+    def test_trajectory_key_distinguishes_rollouts_but_falls_back_for_legacy(self):
+        legacy = {"source": {"qid": 42}}
+        rollout = {
+            "source": {"qid": 42, "trajectory_id": "seed_43:qid_42"}
+        }
+        self.assertEqual(MODULE.trajectory_of(legacy), "42")
+        self.assertEqual(MODULE.trajectory_of(rollout), "seed_43:qid_42")
+
     def test_completion_is_derived_from_specific_subgoal(self):
         self.assertEqual(
             MODULE.completion_from_subgoal("Identify the requested founding year"),

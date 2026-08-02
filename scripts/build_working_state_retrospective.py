@@ -915,6 +915,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-loops-per-trajectory", type=int, default=1)
     parser.add_argument("--min-continues-per-trajectory", type=int, default=0)
     parser.add_argument("--unique-qids", action="store_true")
+    parser.add_argument("--unique-trajectories", action="store_true")
     parser.add_argument("--exclude-qids", nargs="*", default=[])
     parser.add_argument("--exclude-qids-file", type=Path)
     parser.add_argument("--qid-modulus", type=int, default=1)
@@ -958,6 +959,11 @@ def qid_in_partition(qid: str, *, modulus: int, remainder: int) -> bool:
     raw = str(qid)
     value = int(raw) if raw.isdigit() else int(hashlib.sha256(raw.encode()).hexdigest(), 16)
     return value % modulus == remainder
+
+
+def source_trajectory_id(row: dict[str, Any]) -> str:
+    seed = str(row.get("_source_seed") or "unknown_seed")
+    return f"{seed}:qid_{row.get('qid')}"
 
 
 def _usage(*clients: OpenAIChatJSONClient) -> dict[str, int]:
@@ -1008,7 +1014,9 @@ def main() -> None:
     excluded_trailing = 0
     causal_violations: list[dict[str, Any]] = []
     completed_trajectory_qids: list[str] = []
+    completed_trajectory_ids: list[str] = []
     attempted_qids: set[str] = set()
+    attempted_trajectory_ids: set[str] = set()
     excluded_qids = load_excluded_qids(args.exclude_qids, args.exclude_qids_file)
     skipped_excluded_qids = 0
     skipped_qid_partition = 0
@@ -1028,6 +1036,7 @@ def main() -> None:
             "generated_samples": len(records),
             "segmented_trajectories": len(segment_records),
             "completed_trajectory_qids": completed_trajectory_qids,
+            "completed_trajectory_ids": completed_trajectory_ids,
             **_usage(segment_client, state_client),
         }
         if extra:
@@ -1048,6 +1057,7 @@ def main() -> None:
                 continue
             messages = row.get("messages") or []
             qid = str(row.get("qid"))
+            trajectory_id = source_trajectory_id(row)
             if not qid_in_partition(
                 qid, modulus=args.qid_modulus, remainder=args.qid_remainder
             ):
@@ -1057,6 +1067,8 @@ def main() -> None:
                 skipped_excluded_qids += 1
                 continue
             if args.unique_qids and qid in attempted_qids:
+                continue
+            if args.unique_trajectories and trajectory_id in attempted_trajectory_ids:
                 continue
             steps = decision_steps(messages)
             if not (args.min_decision_points <= len(steps) <= args.max_decision_points):
@@ -1076,6 +1088,8 @@ def main() -> None:
                 continue
             if args.unique_qids:
                 attempted_qids.add(qid)
+            if args.unique_trajectories:
+                attempted_trajectory_ids.add(trajectory_id)
             question = str(row.get("question") or "").strip()
             try:
                 segmentation = segment_trajectory(
@@ -1124,6 +1138,8 @@ def main() -> None:
                 "source": {
                     "dataset": "OpenResearcher/OpenResearcher-Dataset",
                     "qid": row.get("qid"),
+                    "trajectory_id": trajectory_id,
+                    "source_seed": row.get("_source_seed"),
                 },
                 "question": question,
                 "message_count": len(messages),
@@ -1200,6 +1216,8 @@ def main() -> None:
                     "source": {
                         "dataset": "OpenResearcher/OpenResearcher-Dataset",
                         "qid": row.get("qid"),
+                        "trajectory_id": trajectory_id,
+                        "source_seed": row.get("_source_seed"),
                         "step_index": decision_index,
                         "prefix_end_message_index": step["prefix_end_message_index"],
                         "retrospective_loop_number": loop_number,
@@ -1287,6 +1305,7 @@ def main() -> None:
                 segments_out.flush()
                 excluded_trailing += trailing
                 completed_trajectory_qids.append(qid)
+                completed_trajectory_ids.append(trajectory_id)
                 checkpoint()
                 print(
                     f"[retrospective] committed trajectory {len(completed_trajectory_qids)}/"
@@ -1301,6 +1320,7 @@ def main() -> None:
         "requested_samples": args.num_samples,
         "requested_trajectories": args.target_trajectories,
         "completed_trajectory_qids": completed_trajectory_qids,
+        "completed_trajectory_ids": completed_trajectory_ids,
         "valid_samples": len(records),
         "action_counts": action_counts,
         "unique_questions": len({str(record["source"]["qid"]) for record in records}),

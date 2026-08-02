@@ -86,6 +86,10 @@ def qid_of(row: dict[str, Any]) -> str:
     return str(row["source"]["qid"])
 
 
+def trajectory_of(row: dict[str, Any]) -> str:
+    return str(row["source"].get("trajectory_id") or qid_of(row))
+
+
 def apply_contract_overrides(
     segment_by_qid: dict[str, dict[str, Any]], overrides: dict[str, Any]
 ) -> list[str]:
@@ -272,8 +276,8 @@ def validate_pool(
 ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, Any]], list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        grouped[qid_of(row)].append(row)
-    segment_map = {qid_of(item): item for item in segments}
+        grouped[trajectory_of(row)].append(row)
+    segment_map = {trajectory_of(item): item for item in segments}
     violations: list[dict[str, Any]] = []
     normalize_directional_contracts(grouped, segment_map)
 
@@ -414,11 +418,11 @@ def main() -> None:
     pool_by_source: dict[tuple[str, int], dict[str, Any]] = {}
     for path in args.pool:
         for row in read_jsonl(path):
-            pool_by_source[(qid_of(row), int(row["source"]["step_index"]))] = row
+            pool_by_source[(trajectory_of(row), int(row["source"]["step_index"]))] = row
     segment_by_qid: dict[str, dict[str, Any]] = {}
     for path in args.segments:
         for row in read_jsonl(path):
-            segment_by_qid[qid_of(row)] = row
+            segment_by_qid[trajectory_of(row)] = row
     override_qids: list[str] = []
     if args.contract_overrides:
         raw_overrides = json.loads(args.contract_overrides.read_text(encoding="utf-8"))
@@ -472,12 +476,17 @@ def main() -> None:
             copied["source"]["selection_role"] = role
             copied["teacher"]["curation"] = "balanced_complete_multiloop_v1"
             selected.append(copied)
-    selected.sort(key=lambda item: (chosen_qids.index(qid_of(item)), int(item["source"]["step_index"])))
+    selected.sort(
+        key=lambda item: (
+            chosen_qids.index(trajectory_of(item)),
+            int(item["source"]["step_index"]),
+        )
+    )
     for index, row in enumerate(selected, start=1):
         row["sample_id"] = f"ws_train_{index:04d}"
 
     action_counts = Counter(row["target"]["loop_decision"]["action"] for row in selected)
-    per_qid = Counter(qid_of(row) for row in selected)
+    per_trajectory = Counter(trajectory_of(row) for row in selected)
     positive_retrieval = sum(
         bool(selected_memories(row))
         for row in selected
@@ -496,8 +505,10 @@ def main() -> None:
         )
     if dict(action_counts) != expected_actions:
         selection_violations.append(f"unexpected action distribution: {dict(action_counts)}")
-    if set(per_qid.values()) != {4} or len(per_qid) != args.questions:
-        selection_violations.append(f"unexpected per-question distribution: {dict(per_qid)}")
+    if set(per_trajectory.values()) != {4} or len(per_trajectory) != args.questions:
+        selection_violations.append(
+            f"unexpected per-trajectory distribution: {dict(per_trajectory)}"
+        )
     if positive_retrieval < args.min_positive_retrieval:
         selection_violations.append(
             f"only {positive_retrieval} selected post-switch CONTINUE samples retrieve prior memory"
@@ -517,9 +528,10 @@ def main() -> None:
     report = {
         "valid": True,
         "samples": len(selected),
-        "chosen_qids": chosen_qids,
+        "chosen_trajectory_ids": chosen_qids,
+        "chosen_qids": [qid_of(grouped[item][0]) for item in chosen_qids],
         "action_counts": dict(action_counts),
-        "samples_per_qid": dict(per_qid),
+        "samples_per_trajectory": dict(per_trajectory),
         "positive_post_switch_retrieval_samples": positive_retrieval,
         "pool_samples": len(pool),
         "pool_trajectories": len(grouped),
