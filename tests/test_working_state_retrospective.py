@@ -46,6 +46,24 @@ def loop_record(
 
 
 class RetrospectiveBuilderTest(unittest.TestCase):
+    def test_qid_partition_is_disjoint_and_deterministic(self):
+        assignments = [
+            remainder
+            for remainder in range(4)
+            if MODULE.qid_in_partition("4626", modulus=4, remainder=remainder)
+        ]
+        self.assertEqual(assignments, [2])
+        self.assertEqual(
+            MODULE.qid_in_partition("non-numeric", modulus=3, remainder=1),
+            MODULE.qid_in_partition("non-numeric", modulus=3, remainder=1),
+        )
+
+    def test_qid_partition_rejects_invalid_range(self):
+        with self.assertRaises(ValueError):
+            MODULE.qid_in_partition("1", modulus=0, remainder=0)
+        with self.assertRaises(ValueError):
+            MODULE.qid_in_partition("1", modulus=4, remainder=4)
+
     def test_excluded_qids_load_from_json_or_lines(self):
         from tempfile import TemporaryDirectory
 

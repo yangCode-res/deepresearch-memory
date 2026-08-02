@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 from copy import deepcopy
 import glob
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -916,6 +917,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--unique-qids", action="store_true")
     parser.add_argument("--exclude-qids", nargs="*", default=[])
     parser.add_argument("--exclude-qids-file", type=Path)
+    parser.add_argument("--qid-modulus", type=int, default=1)
+    parser.add_argument("--qid-remainder", type=int, default=0)
     parser.add_argument("--min-decision-points", type=int, default=3)
     parser.add_argument("--max-decision-points", type=int, default=10)
     parser.add_argument("--max-trajectory-chars", type=int, default=70000)
@@ -947,6 +950,16 @@ def load_excluded_qids(values: list[str], path: Path | None = None) -> set[str]:
     return excluded
 
 
+def qid_in_partition(qid: str, *, modulus: int, remainder: int) -> bool:
+    if modulus < 1:
+        raise ValueError("qid modulus must be at least 1")
+    if not 0 <= remainder < modulus:
+        raise ValueError("qid remainder must satisfy 0 <= remainder < modulus")
+    raw = str(qid)
+    value = int(raw) if raw.isdigit() else int(hashlib.sha256(raw.encode()).hexdigest(), 16)
+    return value % modulus == remainder
+
+
 def _usage(*clients: OpenAIChatJSONClient) -> dict[str, int]:
     return {
         "api_requests": sum(client.request_count for client in clients),
@@ -960,6 +973,12 @@ def main() -> None:
     args = parse_args()
     if not args.api_key or not args.base_url:
         raise SystemExit("controller API configuration is required")
+    try:
+        qid_in_partition(
+            "0", modulus=args.qid_modulus, remainder=args.qid_remainder
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
     paths = glob.glob(args.input_glob)
     if not paths:
         raise SystemExit("no input parquet files matched")
@@ -992,6 +1011,7 @@ def main() -> None:
     attempted_qids: set[str] = set()
     excluded_qids = load_excluded_qids(args.exclude_qids, args.exclude_qids_file)
     skipped_excluded_qids = 0
+    skipped_qid_partition = 0
     skipped_by_loop_count = 0
     skipped_by_continue_count = 0
     target_mode = args.target_trajectories > 0
@@ -1028,6 +1048,11 @@ def main() -> None:
                 continue
             messages = row.get("messages") or []
             qid = str(row.get("qid"))
+            if not qid_in_partition(
+                qid, modulus=args.qid_modulus, remainder=args.qid_remainder
+            ):
+                skipped_qid_partition += 1
+                continue
             if qid in excluded_qids:
                 skipped_excluded_qids += 1
                 continue
@@ -1294,6 +1319,11 @@ def main() -> None:
         "skipped_by_continue_count": skipped_by_continue_count,
         "configured_excluded_qids": sorted(excluded_qids),
         "skipped_excluded_qids": skipped_excluded_qids,
+        "qid_partition": {
+            "modulus": args.qid_modulus,
+            "remainder": args.qid_remainder,
+            "skipped_rows": skipped_qid_partition,
+        },
         "model": args.model,
         **_usage(segment_client, state_client),
         "output": str(args.output),
