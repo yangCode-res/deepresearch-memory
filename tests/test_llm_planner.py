@@ -1,8 +1,12 @@
 import json
+from io import BytesIO
 from pathlib import Path
 import unittest
+from unittest.mock import patch
+import urllib.error
 
 from cl_gism import CLGISMEngine, HeuristicStateUpdater, LLMMemoryReranker, RuleBasedLoopBuilder, build_retrieval_query
+from cl_gism.llm_planner import OpenAIChatJSONClient
 
 
 class FakeClient:
@@ -69,6 +73,37 @@ class LlmPlannerTests(unittest.TestCase):
 
         self.assertEqual(context["retrieval_plan"]["source"], "lexical")
         self.assertEqual(len(context["retrieved_memories"]), 2)
+
+    def test_json_client_retries_http_429(self) -> None:
+        error = urllib.error.HTTPError(
+            "https://example.test/v1/chat/completions",
+            429,
+            "Too many requests",
+            {"Retry-After": "0"},
+            BytesIO(b'{"error":{"message":"limited"}}'),
+        )
+        response = BytesIO(
+            json.dumps(
+                {
+                    "choices": [{"message": {"content": '{"ok": true}'}}],
+                    "usage": {"total_tokens": 3},
+                }
+            ).encode()
+        )
+        response.__enter__ = lambda item: item
+        response.__exit__ = lambda *args: None
+        client = OpenAIChatJSONClient(
+            api_key="test",
+            base_url="https://example.test/v1",
+            max_attempts=2,
+            retry_base_seconds=0,
+        )
+        with patch("urllib.request.urlopen", side_effect=[error, response]), patch(
+            "time.sleep"
+        ) as sleep:
+            self.assertEqual(client.complete_json("system", "user"), {"ok": True})
+        error.close()
+        sleep.assert_called_once_with(0.0)
 
 
 if __name__ == "__main__":

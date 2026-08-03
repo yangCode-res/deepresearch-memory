@@ -36,6 +36,12 @@ for shard in $(seq 0 15); do
     args+=(--pool "${stem}.jsonl" --segments "${stem}.segments.jsonl")
   fi
 done
+for shard in $(seq 0 15); do
+  stem="data/working-state-labels/scale1000_rollouts_retry1/working_state_retrospective_mimo25pro_shard${shard}"
+  if [[ -f "${stem}.jsonl" && -f "${stem}.segments.jsonl" ]]; then
+    args+=(--pool "${stem}.jsonl" --segments "${stem}.segments.jsonl")
+  fi
+done
 args+=(
   --output "$OUTPUT"
   --questions 1000

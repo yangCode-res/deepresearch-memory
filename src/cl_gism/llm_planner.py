@@ -87,12 +87,18 @@ class OpenAIChatJSONClient:
         base_url: str = DEFAULT_BASE_URL,
         timeout_seconds: float = 60.0,
         max_tokens: int = 2048,
+        max_attempts: int = 6,
+        retry_base_seconds: float = 1.0,
+        retry_max_seconds: float = 30.0,
     ) -> None:
         self.api_key = api_key
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_tokens = max_tokens
+        self.max_attempts = max_attempts
+        self.retry_base_seconds = retry_base_seconds
+        self.retry_max_seconds = retry_max_seconds
         self.request_count = 0
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
@@ -132,19 +138,40 @@ class OpenAIChatJSONClient:
             method="POST",
         )
         body = ""
-        for attempt in range(3):
+        for attempt in range(self.max_attempts):
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
                     body = response.read().decode("utf-8")
                 break
             except urllib.error.HTTPError as exc:  # pragma: no cover - network path
                 detail = exc.read().decode("utf-8", errors="ignore")
+                retryable = exc.code in {408, 409, 429, 500, 502, 503, 504}
+                if retryable and attempt + 1 < self.max_attempts:
+                    retry_after = 0.0
+                    if exc.headers:
+                        try:
+                            retry_after = float(exc.headers.get("Retry-After") or 0)
+                        except (TypeError, ValueError):
+                            retry_after = 0.0
+                    delay = min(
+                        self.retry_max_seconds,
+                        max(retry_after, self.retry_base_seconds * (2**attempt)),
+                    )
+                    time.sleep(delay)
+                    continue
                 raise RuntimeError(f"OpenAI request failed with status {exc.code}: {detail}") from exc
             except (urllib.error.URLError, http.client.IncompleteRead, TimeoutError, ConnectionError) as exc:
-                if attempt == 2:  # pragma: no cover - network path
+                if attempt + 1 == self.max_attempts:  # pragma: no cover - network path
                     detail = getattr(exc, "reason", str(exc))
-                    raise RuntimeError(f"OpenAI request failed after 3 attempts: {detail}") from exc
-                time.sleep(0.5 * (2**attempt))
+                    raise RuntimeError(
+                        f"OpenAI request failed after {self.max_attempts} attempts: {detail}"
+                    ) from exc
+                time.sleep(
+                    min(
+                        self.retry_max_seconds,
+                        self.retry_base_seconds * (2**attempt),
+                    )
+                )
 
         data = json.loads(body)
         self.request_count += 1
