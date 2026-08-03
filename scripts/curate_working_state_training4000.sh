@@ -5,7 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 PYTHON="${PYTHON:-python3}"
-OUTPUT="${CONTROLLER_OUTPUT:-data/working-state-labels/working_state_retrospective_mimo25pro_training4000.jsonl}"
+QUESTIONS="${CONTROLLER_QUESTIONS:-1000}"
+SAMPLES=$((QUESTIONS * 4))
+OUTPUT="${CONTROLLER_OUTPUT:-data/working-state-labels/working_state_retrospective_mimo25pro_training${SAMPLES}.jsonl}"
+MIN_POSITIVE_RETRIEVAL="${MIN_POSITIVE_RETRIEVAL:-$((QUESTIONS * 3 / 4))}"
 
 args=(scripts/curate_retrospective_training20.py)
 for stem in \
@@ -44,8 +47,8 @@ for shard in $(seq 0 15); do
 done
 args+=(
   --output "$OUTPUT"
-  --questions 1000
-  --min-positive-retrieval 750
+  --questions "$QUESTIONS"
+  --min-positive-retrieval "$MIN_POSITIVE_RETRIEVAL"
   --contract-overrides configs/working_state_training200_contract_overrides.json
 )
 
